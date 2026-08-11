@@ -107,6 +107,9 @@ struct ObsidianRegistry {
 #[derive(Deserialize)]
 struct ObsidianVault {
     path: String,
+    /// Last-opened timestamp (ms epoch), maintained by Obsidian itself.
+    #[serde(default)]
+    ts: u64,
 }
 
 fn registered_vaults() -> Vec<(String, String)> {
@@ -118,9 +121,11 @@ fn registered_vaults() -> Vec<(String, String)> {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
-    let mut out: Vec<(String, String)> = reg
-        .vaults
-        .values()
+    let mut vaults: Vec<&ObsidianVault> = reg.vaults.values().collect();
+    // Most recently used first — Obsidian updates `ts` whenever a vault opens.
+    vaults.sort_by(|a, b| b.ts.cmp(&a.ts));
+    vaults
+        .into_iter()
         .map(|v| {
             let name = v
                 .path
@@ -131,22 +136,20 @@ fn registered_vaults() -> Vec<(String, String)> {
                 .to_string();
             (name, v.path.clone())
         })
-        .collect();
-    out.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-    out
+        .collect()
 }
 
-/// Vault names with a live Obsidian window, parsed from window titles of the
-/// form "<note> - <vault> - Obsidian <version>".
+/// Live Obsidian windows as (hwnd, vault name), parsed from window titles of
+/// the form "<note> - <vault> - Obsidian <version>".
 #[cfg(windows)]
-fn open_vault_names() -> HashSet<String> {
+fn obsidian_windows() -> Vec<(isize, String)> {
     use windows_sys::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
     };
 
     unsafe extern "system" fn cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let titles = &mut *(lparam as *mut Vec<String>);
+        let wins = &mut *(lparam as *mut Vec<(isize, String)>);
         if IsWindowVisible(hwnd) == 0 {
             return 1;
         }
@@ -155,22 +158,21 @@ fn open_vault_names() -> HashSet<String> {
             let mut buf = vec![0u16; (len + 1) as usize];
             let got = GetWindowTextW(hwnd, buf.as_mut_ptr(), len + 1);
             if got > 0 {
-                titles.push(String::from_utf16_lossy(&buf[..got as usize]));
+                wins.push((hwnd as isize, String::from_utf16_lossy(&buf[..got as usize])));
             }
         }
         1
     }
 
-    let mut titles: Vec<String> = Vec::new();
+    let mut wins: Vec<(isize, String)> = Vec::new();
     unsafe {
-        EnumWindows(Some(cb), &mut titles as *mut Vec<String> as LPARAM);
+        EnumWindows(Some(cb), &mut wins as *mut Vec<(isize, String)> as LPARAM);
     }
-    titles
-        .into_iter()
-        .filter_map(|t| {
+    wins.into_iter()
+        .filter_map(|(h, t)| {
             let parts: Vec<&str> = t.split(" - ").collect();
             if parts.len() >= 3 && parts.last().map_or(false, |l| l.starts_with("Obsidian")) {
-                Some(parts[parts.len() - 2].to_string())
+                Some((h, parts[parts.len() - 2].to_string()))
             } else {
                 None
             }
@@ -179,8 +181,12 @@ fn open_vault_names() -> HashSet<String> {
 }
 
 #[cfg(not(windows))]
+fn obsidian_windows() -> Vec<(isize, String)> {
+    Vec::new()
+}
+
 fn open_vault_names() -> HashSet<String> {
-    HashSet::new()
+    obsidian_windows().into_iter().map(|(_, v)| v).collect()
 }
 
 // ---------------------------------------------------------------- commands
@@ -195,6 +201,8 @@ fn list_vaults(cfg: State<Config>) -> Vec<VaultTile> {
             group_of.insert(v, &g.name);
         }
     }
+    // registered_vaults() is already most-recently-used first; a stable sort
+    // by group index keeps that recency order within each group.
     let mut tiles: Vec<VaultTile> = registered_vaults()
         .into_iter()
         .filter(|(name, _)| !hidden.contains(name))
@@ -205,14 +213,28 @@ fn list_vaults(cfg: State<Config>) -> Vec<VaultTile> {
             path,
         })
         .collect();
-    // Stable order: configured groups first (in config order), then the rest.
     let order: HashMap<&String, usize> =
         cfg.groups.iter().enumerate().map(|(i, g)| (&g.name, i)).collect();
-    tiles.sort_by_key(|t| {
-        let g = order.get(&t.group).copied().unwrap_or(usize::MAX);
-        (g, t.name.to_lowercase())
-    });
+    tiles.sort_by_key(|t| order.get(&t.group).copied().unwrap_or(usize::MAX));
     tiles
+}
+
+/// Close a vault's window gracefully (WM_CLOSE — same as clicking its X;
+/// Obsidian saves state and releases the vault's renderer memory).
+#[tauri::command]
+#[allow(unused_variables)]
+fn close_vault(name: String) {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+        for (h, v) in obsidian_windows() {
+            if v == name {
+                unsafe {
+                    PostMessageW(h as _, WM_CLOSE, 0, 0);
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -286,7 +308,13 @@ fn main() {
                 }
             }
         })
-        .invoke_handler(tauri::generate_handler![list_vaults, launch, hide_window, quit])
+        .invoke_handler(tauri::generate_handler![
+            list_vaults,
+            launch,
+            close_vault,
+            hide_window,
+            quit
+        ])
         .run(tauri::generate_context!())
         .expect("hvelf: failed to start");
 }

@@ -18,6 +18,11 @@ one glance. That is all hvelf does.
   the vault if not (via Obsidian's `obsidian://` URI).
 - **Live state**: tiles show which vaults are open right now, read from the
   actual windows — not from stale session data.
+- **Close from the board**: hovering an open tile reveals an `×` that closes
+  that vault's window (a normal close — Obsidian saves state), freeing the
+  RAM its renderer held.
+- **Recency order**: tiles are sorted most-recently-used first (Obsidian's own
+  timestamps), so `1` is always your latest vault.
 - **Keyboard-first**: `1`–`9` launch tiles directly, type to filter,
   `Enter` opens the first match, `Ctrl+Q` quits.
 - **Customisable tiles**: groups, ordering, hidden vaults and per-vault deep

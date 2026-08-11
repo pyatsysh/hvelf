@@ -45,8 +45,17 @@ function render() {
       tile.innerHTML =
         `<span class="badge">${idx <= 9 ? idx : ""}</span>` +
         `<span class="dot"></span>` +
-        `<span class="name">${t.name}</span>`;
-      tile.addEventListener("click", () => launch(t.name));
+        `<span class="name">${t.name}</span>` +
+        (t.open ? `<span class="close" title="close vault (frees its RAM)">×</span>` : "");
+      tile.addEventListener("click", (e) => {
+        if (e.target.classList.contains("close")) {
+          e.stopPropagation();
+          invoke("close_vault", { name: t.name });
+          setTimeout(refresh, 700); // give the window a moment to die
+          return;
+        }
+        launch(t.name);
+      });
       grid.appendChild(tile);
     }
     section.appendChild(grid);
