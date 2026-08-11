@@ -1,4 +1,4 @@
-// hvelf — hotkey-summoned tile board for launching Obsidian vaults.
+// hvelf: hotkey-summoned tile board for launching Obsidian vaults.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::collections::{HashMap, HashSet};
@@ -7,7 +7,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
-use tauri_plugin_global_shortcut::ShortcutState;
 
 // ---------------------------------------------------------------- config
 
@@ -15,6 +14,9 @@ use tauri_plugin_global_shortcut::ShortcutState;
 #[serde(rename_all = "camelCase", default)]
 struct Config {
     hotkey: String,
+    /// Optional second hotkey that opens the most recent vault directly,
+    /// without showing the board. Empty string disables it.
+    quick_launch: String,
     hide_on_blur: bool,
     hide: Vec<String>,
     groups: Vec<Group>,
@@ -31,7 +33,8 @@ struct Group {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            hotkey: "ctrl+alt+o".into(),
+            hotkey: "alt+grave".into(),
+            quick_launch: String::new(),
             hide_on_blur: true,
             hide: Vec::new(),
             groups: Vec::new(),
@@ -122,7 +125,7 @@ fn registered_vaults() -> Vec<(String, String)> {
         Err(_) => return Vec::new(),
     };
     let mut vaults: Vec<&ObsidianVault> = reg.vaults.values().collect();
-    // Most recently used first — Obsidian updates `ts` whenever a vault opens.
+    // Most recently used first: Obsidian updates `ts` whenever a vault opens.
     vaults.sort_by(|a, b| b.ts.cmp(&a.ts));
     vaults
         .into_iter()
@@ -219,7 +222,7 @@ fn list_vaults(cfg: State<Config>) -> Vec<VaultTile> {
     tiles
 }
 
-/// Close a vault's window gracefully (WM_CLOSE — same as clicking its X;
+/// Close a vault's window gracefully (WM_CLOSE: same as clicking its X;
 /// Obsidian saves state and releases the vault's renderer memory).
 #[tauri::command]
 #[allow(unused_variables)]
@@ -237,10 +240,9 @@ fn close_vault(name: String) {
     }
 }
 
-#[tauri::command]
-fn launch(app: AppHandle, cfg: State<Config>, name: String) {
-    let mut uri = format!("obsidian://open?vault={}", urlencoding::encode(&name));
-    if let Some(file) = cfg.deep_links.get(&name) {
+fn do_launch(app: &AppHandle, cfg: &Config, name: &str) {
+    let mut uri = format!("obsidian://open?vault={}", urlencoding::encode(name));
+    if let Some(file) = cfg.deep_links.get(name) {
         uri.push_str(&format!("&file={}", urlencoding::encode(file)));
     }
     #[cfg(windows)]
@@ -252,7 +254,118 @@ fn launch(app: AppHandle, cfg: State<Config>, name: String) {
     if let Err(e) = res {
         eprintln!("hvelf: failed to launch {uri}: {e}");
     }
-    hide_window(app);
+    hide_window(app.clone());
+}
+
+fn most_recent_vault(cfg: &Config) -> Option<String> {
+    registered_vaults()
+        .into_iter()
+        .find(|(name, _)| !cfg.hide.contains(name))
+        .map(|(name, _)| name)
+}
+
+#[tauri::command]
+fn launch(app: AppHandle, cfg: State<Config>, name: String) {
+    do_launch(&app, cfg.inner(), &name);
+}
+
+// ------------------------------------------------------- global hotkeys
+//
+// Native RegisterHotKey instead of a hotkey library, for one reason: the
+// key named "grave" must be the physical key under Esc on EVERY layout.
+// Libraries map key names to virtual keys through a US table, which lands
+// punctuation keys on the wrong physical key elsewhere (on UK, Backquote
+// becomes the #~ key). Scancode 0x29 translated through the live layout
+// gives the right virtual key everywhere.
+
+#[cfg(windows)]
+struct HotSpec {
+    mods: u32,
+    vk: u32,
+}
+
+#[cfg(windows)]
+fn parse_hotkey(s: &str) -> Option<HotSpec> {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        MapVirtualKeyW, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN,
+    };
+    let mut mods = 0u32;
+    let mut vk: Option<u32> = None;
+    for tok in s.split('+') {
+        let t = tok.trim().to_lowercase();
+        match t.as_str() {
+            "alt" => mods |= MOD_ALT,
+            "ctrl" | "control" => mods |= MOD_CONTROL,
+            "shift" => mods |= MOD_SHIFT,
+            "win" | "super" | "meta" => mods |= MOD_WIN,
+            "grave" | "backquote" | "`" => {
+                // Physical key under Esc, whatever the layout calls it.
+                vk = Some(unsafe { MapVirtualKeyW(0x29, 1) });
+            }
+            key => {
+                let key = key.strip_prefix("digit").unwrap_or(key);
+                let key = key.strip_prefix("key").unwrap_or(key);
+                if key.len() == 1 {
+                    let c = key.chars().next().unwrap().to_ascii_uppercase();
+                    if c.is_ascii_alphanumeric() {
+                        vk = Some(c as u32);
+                    }
+                } else if let Some(n) = key.strip_prefix('f').and_then(|n| n.parse::<u32>().ok()) {
+                    if (1..=24).contains(&n) {
+                        vk = Some(0x6F + n); // VK_F1 is 0x70
+                    }
+                }
+            }
+        }
+    }
+    vk.filter(|&v| v != 0).map(|vk| HotSpec { mods, vk })
+}
+
+#[cfg(windows)]
+fn spawn_hotkeys(app: AppHandle, cfg: Config) {
+    std::thread::spawn(move || unsafe {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_NOREPEAT};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+
+        match parse_hotkey(&cfg.hotkey) {
+            Some(h) => {
+                if RegisterHotKey(std::ptr::null_mut(), 1, h.mods | MOD_NOREPEAT, h.vk) == 0 {
+                    eprintln!("hvelf: hotkey '{}' is taken by another app", cfg.hotkey);
+                }
+            }
+            None => eprintln!("hvelf: cannot parse hotkey '{}'", cfg.hotkey),
+        }
+        if !cfg.quick_launch.is_empty() {
+            match parse_hotkey(&cfg.quick_launch) {
+                Some(h) => {
+                    if RegisterHotKey(std::ptr::null_mut(), 2, h.mods | MOD_NOREPEAT, h.vk) == 0 {
+                        eprintln!("hvelf: quickLaunch '{}' is taken by another app", cfg.quick_launch);
+                    }
+                }
+                None => eprintln!("hvelf: cannot parse quickLaunch '{}'", cfg.quick_launch),
+            }
+        }
+
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if msg.message == WM_HOTKEY {
+                match msg.wParam {
+                    1 => toggle_window(&app),
+                    2 => {
+                        if let Some(name) = most_recent_vault(&cfg) {
+                            do_launch(&app, &cfg, &name);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn spawn_hotkeys(_app: AppHandle, _cfg: Config) {
+    eprintln!("hvelf: global hotkeys are Windows-only for now");
 }
 
 #[tauri::command]
@@ -280,27 +393,53 @@ fn toggle_window(app: &AppHandle) {
 
 // ---------------------------------------------------------------- main
 
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::menu::{Menu, MenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show = MenuItem::with_id(app, "show", "Show board", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit hvelf", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &quit])?;
+
+    TrayIconBuilder::with_id("hvelf")
+        .icon(app.default_window_icon().expect("no window icon").clone())
+        .tooltip("hvelf")
+        .menu(&menu)
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, e| match e.id.as_ref() {
+            "show" => toggle_window(app),
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                toggle_window(tray.app_handle());
+            }
+        })
+        .build(app)?;
+    Ok(())
+}
+
 fn main() {
     let cfg = load_or_seed_config();
-    let hotkey = cfg.hotkey.clone();
     let hide_on_blur = cfg.hide_on_blur;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             toggle_window(app);
         }))
-        .plugin(
-            tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcuts([hotkey.as_str()])
-                .expect("hvelf: invalid hotkey in config.json")
-                .with_handler(|app, _shortcut, event| {
-                    if event.state() == ShortcutState::Pressed {
-                        toggle_window(app);
-                    }
-                })
-                .build(),
-        )
         .manage(cfg)
+        .setup(|app| {
+            build_tray(app)?;
+            let cfg = app.state::<Config>().inner().clone();
+            spawn_hotkeys(app.handle().clone(), cfg);
+            Ok(())
+        })
         .on_window_event(move |window, event| {
             if hide_on_blur {
                 if let tauri::WindowEvent::Focused(false) = event {

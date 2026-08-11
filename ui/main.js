@@ -1,4 +1,4 @@
-// hvelf board UI — plain JS, no bundler.
+// hvelf board UI: plain JS, no bundler.
 const { invoke } = window.__TAURI__.core;
 
 const filterEl = document.getElementById("filter");

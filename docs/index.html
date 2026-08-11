@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>hvelf</title>
+<meta name="description" content="A hotkey-summoned tile board for launching Obsidian vaults on Windows." />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Fredericka+the+Great&family=Crimson+Text:ital,wght@0,400;0,600;1,400&family=Headland+One&family=Roboto+Mono:wght@400&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --field:  #ECEFF4;   /* nord6 snow storm */
+    --card:   #ffffff;
+    --chrome: #5E81AC;   /* nord10 frost */
+    --accent: #BF616A;   /* nord11 aurora */
+    --ink:    #2E3440;   /* nord0 */
+    --muted:  #4C566A;   /* nord3 */
+    --code:   #E5E9F0;   /* nord5 */
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--field); color: var(--ink);
+    font-family: "Crimson Text", Georgia, serif; font-size: 19px; line-height: 1.6;
+  }
+  .bar { background: var(--chrome); color: #fff; padding: .7rem 1.4rem;
+         font-family: "Headland One", serif; letter-spacing: .02em; }
+  .bar a { color: #fff; text-decoration: none; margin-right: 1.4rem; opacity: .92; }
+  .bar a:hover { opacity: 1; text-decoration: underline; }
+  .wrap { max-width: 46rem; margin: 0 auto; padding: 2.6rem 1.4rem 4rem; }
+  .eyebrow { font-family: "Headland One", serif; font-variant: small-caps;
+             letter-spacing: .09em; color: var(--muted); font-size: .82rem; }
+  h1 { font-family: "Fredericka the Great", cursive; font-weight: 400;
+       font-size: clamp(3.2rem, 11vw, 5rem); margin: .2rem 0 .1rem; line-height: 1; }
+  h2 { font-family: "Fredericka the Great", cursive; font-weight: 400;
+       font-size: 1.9rem; margin: 2.6rem 0 .6rem; }
+  .tagline { font-style: italic; color: var(--muted); margin: 0 0 1.6rem; }
+  .card { background: var(--card); border-radius: 4px; padding: 1.4rem 1.6rem;
+          margin: 1.2rem 0; }
+  a { color: var(--accent); }
+  code, pre { font-family: "Roboto Mono", monospace; font-size: .84em; }
+  code { background: var(--code); padding: .1em .34em; border-radius: 3px; }
+  pre { background: var(--code); padding: 1rem 1.2rem; border-radius: 4px;
+        overflow-x: auto; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  ul { padding-left: 1.2rem; }
+  li { margin: .45rem 0; }
+  kbd { font-family: "Roboto Mono", monospace; font-size: .78em; background: #fff;
+        border: 1px solid #D8DEE9; border-bottom-width: 2px; border-radius: 3px;
+        padding: .08em .38em; }
+  /* The board itself, drawn in CSS. */
+  .board { background: var(--ink); border-radius: 6px; padding: 1.1rem;
+           display: grid; grid-template-columns: repeat(4, 1fr); gap: .6rem; margin: 1.4rem 0; }
+  .tile { background: #3B4252; color: #D8DEE9; border-radius: 4px; padding: .7rem .6rem;
+          font-family: "Headland One", serif; font-size: .8rem; position: relative; }
+  .tile span { position: absolute; top: .3rem; right: .45rem; font-family: "Roboto Mono", monospace;
+               font-size: .68rem; color: #81A1C1; }
+  .tile.open { background: #434C5E; box-shadow: inset 3px 0 0 var(--accent); }
+  .caption { font-style: italic; color: var(--muted); font-size: .86rem; margin-top: -.7rem; }
+  footer { color: var(--muted); font-size: .84rem; border-top: 1px solid #D8DEE9;
+           margin-top: 3rem; padding-top: 1rem; }
+  @media (max-width: 34rem) { .board { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+
+<nav class="bar">
+  <a href="https://github.com/pyatsysh/hvelf">Source</a>
+  <a href="https://github.com/pyatsysh/hvelf#build">Build</a>
+  <a href="https://github.com/pyatsysh/hvelf#configuration">Configuration</a>
+</nav>
+
+<div class="wrap">
+  <p class="eyebrow">Obsidian utility · Windows · Tauri 2</p>
+  <h1>hvelf</h1>
+  <p class="tagline">Old Norse <strong>hvelfa</strong>: to vault, to arch.</p>
+
+  <p>A hotkey-summoned tile board for your <a href="https://obsidian.md">Obsidian</a>
+  vaults. Press a key, see your vaults as tiles, hit a number or click. The vault
+  opens, or its existing window comes to front, and the board gets out of your way.</p>
+
+  <div class="board" aria-label="Illustration of the tile board">
+    <div class="tile open">cDFT<span>1</span></div>
+    <div class="tile">AISTATS<span>2</span></div>
+    <div class="tile open">admin<span>3</span></div>
+    <div class="tile">melt<span>4</span></div>
+    <div class="tile">shop<span>5</span></div>
+    <div class="tile">kellax<span>6</span></div>
+    <div class="tile">taxes<span>7</span></div>
+    <div class="tile">notes<span>8</span></div>
+  </div>
+  <p class="caption">Open vaults carry an aurora edge. Recency puts the last vault you
+  used at <kbd>1</kbd>.</p>
+
+  <p>Obsidian's own vault switcher is modal and slow, and the tray flyout is an
+  unlabelled list. If you run many vaults, switching should cost one keystroke and
+  one glance. That is all hvelf does.</p>
+
+  <h2>What it does</h2>
+  <div class="card">
+  <ul>
+    <li><strong>Summoned on a hotkey.</strong> <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>O</kbd>
+      by default toggles the board; <kbd>Esc</kbd> or focus loss dismisses it. No
+      taskbar clutter, no dock icon.</li>
+    <li><strong>Focus or launch.</strong> A tile raises the vault's window if it is
+      already open, and opens the vault through Obsidian's <code>obsidian://</code>
+      URI if it is not.</li>
+    <li><strong>Live state.</strong> Tiles show which vaults are open right now, read
+      from the actual windows rather than from session data that may be stale.</li>
+    <li><strong>Close from the board.</strong> Hovering an open tile reveals an
+      <code>×</code> that closes that vault's window. It is an ordinary close, so
+      Obsidian saves state, and the renderer gives back the RAM it was holding.</li>
+    <li><strong>Recency order.</strong> Tiles sort most-recently-used first, on
+      Obsidian's own timestamps.</li>
+    <li><strong>Keyboard first.</strong> <kbd>1</kbd>–<kbd>9</kbd> launch tiles
+      directly, typing filters them, <kbd>Enter</kbd> opens the first match,
+      <kbd>Ctrl</kbd>+<kbd>Q</kbd> quits.</li>
+    <li><strong>Customisable tiles.</strong> Groups, ordering, hidden vaults and
+      per-vault deep links, all in one JSON config. A deep link opens a vault
+      straight onto a named note.</li>
+    <li><strong>Light.</strong> One small binary on Tauri 2 and WebView2, with no
+      Electron and no background CPU.</li>
+  </ul>
+  </div>
+
+  <p>Vaults come from Obsidian's own registry (<code>obsidian.json</code>), so there
+  is nothing to set up and the board always matches what Obsidian knows.</p>
+
+  <h2>Build</h2>
+  <p>Requires Rust, with the MSVC toolchain on Windows. No Node, no npm.</p>
+<pre><code>cd src-tauri
+cargo build --release</code></pre>
+  <p>The binary lands in <code>src-tauri/target/release/hvelf.exe</code>. Run it once
+  and it sits silent until the hotkey.</p>
+
+  <h2>Configuration</h2>
+  <p><code>%APPDATA%\hvelf\config.json</code>, created with defaults on first run:</p>
+<pre><code>{
+  "hotkey": "ctrl+alt+o",
+  "hideOnBlur": true,
+  "hide": ["OldVault"],
+  "groups": [
+    { "name": "research", "vaults": ["melt", "cDFT", "AISTATS"] },
+    { "name": "admin", "vaults": ["taxes"] }
+  ],
+  "deepLinks": { "melt": "index" }
+}</code></pre>
+  <p>The config is read at startup, so restart hvelf after editing it. Full field
+  notes are in the <a href="https://github.com/pyatsysh/hvelf#configuration">README</a>.</p>
+
+  <h2>Status</h2>
+  <p>Windows first: window detection and launching are Windows-native so far. The rest
+  is portable Rust, and macOS and Linux are on the roadmap along with a tray icon,
+  autostart and themes.</p>
+  <p>Known limitation: the underlying hotkey library maps key names US-layout-style,
+  so punctuation keys land on different physical keys elsewhere. On a UK layout
+  <code>Backquote</code> is the <code>#~</code> key rather than the key under Esc.
+  Letters and digits are safe on any layout. Binding the physical key regardless of
+  layout needs scancode-based registration, which is on the roadmap.</p>
+
+  <footer>
+    © Peter Yatsyshin · MIT licence ·
+    <a href="https://github.com/pyatsysh/hvelf">github.com/pyatsysh/hvelf</a>
+  </footer>
+</div>
+
+</body>
+</html>
