@@ -71,6 +71,12 @@ Windows-first (window detection and launching are Windows-native so far).
 The rest is portable Rust; macOS/Linux are on the roadmap, along with a tray
 icon, autostart and themes.
 
+Known limitation: hotkey key names are mapped US-layout-style by the
+underlying hotkey library, so punctuation keys land on different physical
+keys on other layouts (on UK, `Backquote` is the `#~` key, not the key under
+Esc). Letters and digits are safe on any layout. Scancode-based registration
+(bind the physical key regardless of layout) is on the roadmap.
+
 ## Licence
 
 MIT
