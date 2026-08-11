@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "hvelf main window",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}
