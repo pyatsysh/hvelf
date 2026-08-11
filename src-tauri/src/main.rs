@@ -115,7 +115,7 @@ struct ObsidianVault {
     ts: u64,
 }
 
-fn registered_vaults() -> Vec<(String, String)> {
+fn registered_vaults() -> Vec<(String, String, u64)> {
     let raw = match fs::read_to_string(obsidian_json_path()) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
@@ -124,11 +124,8 @@ fn registered_vaults() -> Vec<(String, String)> {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
-    let mut vaults: Vec<&ObsidianVault> = reg.vaults.values().collect();
-    // Most recently used first: Obsidian updates `ts` whenever a vault opens.
-    vaults.sort_by(|a, b| b.ts.cmp(&a.ts));
-    vaults
-        .into_iter()
+    reg.vaults
+        .values()
         .map(|v| {
             let name = v
                 .path
@@ -137,9 +134,64 @@ fn registered_vaults() -> Vec<(String, String)> {
                 .next()
                 .unwrap_or(&v.path)
                 .to_string();
-            (name, v.path.clone())
+            (name, v.path.clone(), v.ts)
         })
         .collect()
+}
+
+// ---------------------------------------------------------- focus history
+//
+// Obsidian's `ts` stamps a vault when it is OPENED, not while it is used, so
+// on its own it misranks a vault you have had open all day but are typing in
+// right now. hvelf keeps its own record of which vault window was last in
+// the foreground (sampled every 2s by the hotkey thread) and ranks by
+// whichever signal is newer.
+
+#[derive(Clone, Default)]
+struct FocusHistory(std::sync::Arc<std::sync::Mutex<HashMap<String, u64>>>);
+
+impl FocusHistory {
+    fn note(&self, vault: String) {
+        self.0.lock().unwrap().insert(vault, now_ms());
+    }
+    fn get(&self, vault: &str) -> u64 {
+        self.0.lock().unwrap().get(vault).copied().unwrap_or(0)
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Extract the vault name from an Obsidian window title of the form
+/// "<note> - <vault> - Obsidian <version>".
+fn vault_from_title(title: &str) -> Option<String> {
+    let parts: Vec<&str> = title.split(" - ").collect();
+    if parts.len() >= 3 && parts.last().map_or(false, |l| l.starts_with("Obsidian")) {
+        Some(parts[parts.len() - 2].to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn foreground_vault() -> Option<String> {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+    unsafe {
+        let h = GetForegroundWindow();
+        if h.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let got = GetWindowTextW(h, buf.as_mut_ptr(), 512);
+        if got <= 0 {
+            return None;
+        }
+        vault_from_title(&String::from_utf16_lossy(&buf[..got as usize]))
+    }
 }
 
 /// Live Obsidian windows as (hwnd, vault name), parsed from window titles of
@@ -172,14 +224,7 @@ fn obsidian_windows() -> Vec<(isize, String)> {
         EnumWindows(Some(cb), &mut wins as *mut Vec<(isize, String)> as LPARAM);
     }
     wins.into_iter()
-        .filter_map(|(h, t)| {
-            let parts: Vec<&str> = t.split(" - ").collect();
-            if parts.len() >= 3 && parts.last().map_or(false, |l| l.starts_with("Obsidian")) {
-                Some((h, parts[parts.len() - 2].to_string()))
-            } else {
-                None
-            }
-        })
+        .filter_map(|(h, t)| vault_from_title(&t).map(|v| (h, v)))
         .collect()
 }
 
@@ -195,7 +240,7 @@ fn open_vault_names() -> HashSet<String> {
 // ---------------------------------------------------------------- commands
 
 #[tauri::command]
-fn list_vaults(cfg: State<Config>) -> Vec<VaultTile> {
+fn list_vaults(cfg: State<Config>, hist: State<FocusHistory>) -> Vec<VaultTile> {
     let open = open_vault_names();
     let hidden: HashSet<&String> = cfg.hide.iter().collect();
     let mut group_of: HashMap<&String, &String> = HashMap::new();
@@ -204,22 +249,33 @@ fn list_vaults(cfg: State<Config>) -> Vec<VaultTile> {
             group_of.insert(v, &g.name);
         }
     }
-    // registered_vaults() is already most-recently-used first; a stable sort
-    // by group index keeps that recency order within each group.
-    let mut tiles: Vec<VaultTile> = registered_vaults()
+    // Rank by whichever is newer: Obsidian's last-opened stamp or hvelf's
+    // own last-focused record. Groups keep config order; recency within.
+    let mut ranked: Vec<(VaultTile, u64)> = registered_vaults()
         .into_iter()
-        .filter(|(name, _)| !hidden.contains(name))
-        .map(|(name, path)| VaultTile {
-            open: open.contains(&name),
-            group: group_of.get(&name).map(|s| s.to_string()).unwrap_or_default(),
-            name,
-            path,
+        .filter(|(name, _, _)| !hidden.contains(name))
+        .map(|(name, path, ts)| {
+            let eff = ts.max(hist.get(&name));
+            (
+                VaultTile {
+                    open: open.contains(&name),
+                    group: group_of.get(&name).map(|s| s.to_string()).unwrap_or_default(),
+                    name,
+                    path,
+                },
+                eff,
+            )
         })
         .collect();
     let order: HashMap<&String, usize> =
         cfg.groups.iter().enumerate().map(|(i, g)| (&g.name, i)).collect();
-    tiles.sort_by_key(|t| order.get(&t.group).copied().unwrap_or(usize::MAX));
-    tiles
+    ranked.sort_by_key(|(t, eff)| {
+        (
+            order.get(&t.group).copied().unwrap_or(usize::MAX),
+            std::cmp::Reverse(*eff),
+        )
+    });
+    ranked.into_iter().map(|(t, _)| t).collect()
 }
 
 /// Close a vault's window gracefully (WM_CLOSE: same as clicking its X;
@@ -286,11 +342,12 @@ fn open_uri(uri: &str) {
     }
 }
 
-fn most_recent_vault(cfg: &Config) -> Option<String> {
+fn most_recent_vault(cfg: &Config, hist: &FocusHistory) -> Option<String> {
     registered_vaults()
         .into_iter()
-        .find(|(name, _)| !cfg.hide.contains(name))
-        .map(|(name, _)| name)
+        .filter(|(name, _, _)| !cfg.hide.contains(name))
+        .max_by_key(|(name, _, ts)| (*ts).max(hist.get(name)))
+        .map(|(name, _, _)| name)
 }
 
 #[tauri::command]
@@ -351,10 +408,12 @@ fn parse_hotkey(s: &str) -> Option<HotSpec> {
 }
 
 #[cfg(windows)]
-fn spawn_hotkeys(app: AppHandle, cfg: Config) {
+fn spawn_hotkeys(app: AppHandle, cfg: Config, hist: FocusHistory) {
     std::thread::spawn(move || unsafe {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_NOREPEAT};
-        use windows_sys::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetMessageW, SetTimer, MSG, WM_HOTKEY, WM_TIMER,
+        };
 
         match parse_hotkey(&cfg.hotkey) {
             Some(h) => {
@@ -375,25 +434,35 @@ fn spawn_hotkeys(app: AppHandle, cfg: Config) {
             }
         }
 
+        // Sample the foreground window every 2s to learn which vault the
+        // user is actually in; WM_TIMER arrives on this thread's queue.
+        SetTimer(std::ptr::null_mut(), 1, 2000, None);
+
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            if msg.message == WM_HOTKEY {
-                match msg.wParam {
+            match msg.message {
+                WM_HOTKEY => match msg.wParam {
                     1 => toggle_window(&app),
                     2 => {
-                        if let Some(name) = most_recent_vault(&cfg) {
+                        if let Some(name) = most_recent_vault(&cfg, &hist) {
                             do_launch(&app, &cfg, &name);
                         }
                     }
                     _ => {}
+                },
+                WM_TIMER => {
+                    if let Some(v) = foreground_vault() {
+                        hist.note(v);
+                    }
                 }
+                _ => {}
             }
         }
     });
 }
 
 #[cfg(not(windows))]
-fn spawn_hotkeys(_app: AppHandle, _cfg: Config) {
+fn spawn_hotkeys(_app: AppHandle, _cfg: Config, _hist: FocusHistory) {
     eprintln!("hvelf: global hotkeys are Windows-only for now");
 }
 
@@ -463,10 +532,12 @@ fn main() {
             toggle_window(app);
         }))
         .manage(cfg)
+        .manage(FocusHistory::default())
         .setup(|app| {
             build_tray(app)?;
             let cfg = app.state::<Config>().inner().clone();
-            spawn_hotkeys(app.handle().clone(), cfg);
+            let hist = app.state::<FocusHistory>().inner().clone();
+            spawn_hotkeys(app.handle().clone(), cfg, hist);
             Ok(())
         })
         .on_window_event(move |window, event| {

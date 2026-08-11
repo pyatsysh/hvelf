@@ -24,8 +24,10 @@ and one glance. That is all hvelf does.
 - **Close from the board**: hovering an open tile reveals an `×` that closes
   that vault's window. It is an ordinary close, so Obsidian saves state, and
   the renderer gives back the RAM it was holding.
-- **Recency order**: tiles sort most-recently-used first, on Obsidian's own
-  timestamps, so `1` is always the vault you were last in.
+- **Recency order**: tiles sort most-recently-used first, so `1` is always
+  the vault you were last in. While hvelf runs it tracks which vault window
+  you actually have focused, which beats Obsidian's own timestamps: those
+  only update when a vault is opened, not while you work in it.
 - **Keyboard first**: `1`–`9` launch tiles directly, typing filters them,
   `Enter` opens the first match, `Ctrl+Q` quits.
 - **Customisable tiles**: groups, ordering, hidden vaults and per-vault deep
