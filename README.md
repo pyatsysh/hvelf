@@ -1,6 +1,9 @@
 # hvelf
 
-*Old Norse **hvelfa**: to vault, to arch.*
+<img src="src-tauri/icons/icon-512.png" width="120" align="right" alt="an arcade of vault doorways, the centre one lit" />
+
+*Old Norse **hvelfa**: to vault, to arch. Its descendants still mean vault:
+Norwegian hvelv is a bank vault, Icelandic hvelfing a vaulted ceiling.*
 
 A hotkey-summoned tile board for your [Obsidian](https://obsidian.md) vaults.
 Press a key, see your vaults as tiles, hit a number or click. The vault opens,
