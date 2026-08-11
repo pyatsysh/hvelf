@@ -100,7 +100,7 @@ On macOS the app compiles and the basics work: vaults are discovered from
 Obsidian's registry, tiles launch and focus vaults through the `obsidian://`
 URI, and the tray menu runs. Three things do not work there yet:
 
-- the global hotkeys (summon and quick launch) - a small port, planned first;
+- the global hotkeys (summon and quick launch): a small port, planned first;
 - live open state (the green dots and the close button);
 - focus-based recency, which falls back to Obsidian's last-opened timestamps.
 

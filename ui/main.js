@@ -85,7 +85,10 @@ document.addEventListener("keydown", (e) => {
     launch(visible[0].name);
     return;
   }
-  if (/^[1-9]$/.test(e.key) && document.activeElement !== filterEl) {
+  // Digits are quick picks while the filter is empty; once the user has
+  // started typing they belong to the filter (vault names contain digits).
+  if (/^[1-9]$/.test(e.key) && filterEl.value === "") {
+    e.preventDefault();
     const i = parseInt(e.key, 10) - 1;
     if (visible[i]) launch(visible[i].name);
     return;
