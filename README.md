@@ -94,9 +94,20 @@ sits silent until the hotkey.
 
 ## Status
 
-Windows first: window detection, hotkey registration and launching are
-Windows-native so far. The rest is portable Rust, and macOS and Linux are on
-the roadmap along with autostart and themes.
+Windows is the supported platform today.
+
+On macOS the app compiles and the basics work: vaults are discovered from
+Obsidian's registry, tiles launch and focus vaults through the `obsidian://`
+URI, and the tray menu runs. Three things do not work there yet:
+
+- the global hotkeys (summon and quick launch) - a small port, planned first;
+- live open state (the green dots and the close button);
+- focus-based recency, which falls back to Obsidian's last-opened timestamps.
+
+The last two need macOS's accessibility permission to read window titles, so
+they will arrive permission-gated with a graceful fallback. Until then, treat
+macOS as launch-only. Linux is untested. Autostart and themes are on the
+roadmap for every platform.
 
 ## Licence
 
