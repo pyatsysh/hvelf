@@ -297,13 +297,40 @@ fn close_vault(name: String) {
 }
 
 fn do_launch(app: &AppHandle, cfg: &Config, name: &str) {
+    hide_window(app.clone());
+    // An already-open vault is focused by hvelf itself: as the recipient of
+    // the user's hotkey or click, hvelf holds the foreground-change rights
+    // that Windows denies to a background Obsidian asked via URI. The URI
+    // path serves vaults with no window yet, and deep links which must
+    // navigate inside the vault.
+    if !cfg.deep_links.contains_key(name) {
+        if let Some((h, _)) = obsidian_windows().into_iter().find(|(_, v)| v == name) {
+            focus_window(h);
+            return;
+        }
+    }
     let mut uri = format!("obsidian://open?vault={}", urlencoding::encode(name));
     if let Some(file) = cfg.deep_links.get(name) {
         uri.push_str(&format!("&file={}", urlencoding::encode(file)));
     }
     open_uri(&uri);
-    hide_window(app.clone());
 }
+
+#[cfg(windows)]
+fn focus_window(hwnd: isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE,
+    };
+    unsafe {
+        if IsIconic(hwnd as _) != 0 {
+            ShowWindow(hwnd as _, SW_RESTORE);
+        }
+        SetForegroundWindow(hwnd as _);
+    }
+}
+
+#[cfg(not(windows))]
+fn focus_window(_hwnd: isize) {}
 
 /// Dispatch a URI through the OS. On Windows this must be ShellExecuteW:
 /// `explorer.exe <uri>` looks like it should work but on current Windows 11
