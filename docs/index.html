@@ -4,7 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>hvelf</title>
-<meta name="description" content="A hotkey-summoned tile board for launching Obsidian vaults on Windows." />
+<meta name="description" content="A hotkey-summoned tile board for launching Obsidian vaults." />
+<link rel="icon" href="icon-512.png" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Fredericka+the+Great&family=Crimson+Text:ital,wght@0,400;0,600;1,400&family=Headland+One&family=Roboto+Mono:wght@400&display=swap" rel="stylesheet" />
@@ -28,13 +29,15 @@
   .bar a { color: #fff; text-decoration: none; margin-right: 1.4rem; opacity: .92; }
   .bar a:hover { opacity: 1; text-decoration: underline; }
   .wrap { max-width: 46rem; margin: 0 auto; padding: 2.6rem 1.4rem 4rem; }
+  .hero { display: flex; align-items: flex-start; gap: 1.6rem; }
+  .hero img { width: 112px; height: auto; flex: none; margin-top: .6rem; }
   .eyebrow { font-family: "Headland One", serif; font-variant: small-caps;
              letter-spacing: .09em; color: var(--muted); font-size: .82rem; }
   h1 { font-family: "Fredericka the Great", cursive; font-weight: 400;
        font-size: clamp(3.2rem, 11vw, 5rem); margin: .2rem 0 .1rem; line-height: 1; }
   h2 { font-family: "Fredericka the Great", cursive; font-weight: 400;
        font-size: 1.9rem; margin: 2.6rem 0 .6rem; }
-  .tagline { font-style: italic; color: var(--muted); margin: 0 0 1.6rem; }
+  .tagline { font-style: italic; color: var(--muted); margin: 0 0 1rem; }
   .card { background: var(--card); border-radius: 4px; padding: 1.4rem 1.6rem;
           margin: 1.2rem 0; }
   a { color: var(--accent); }
@@ -59,7 +62,11 @@
   .caption { font-style: italic; color: var(--muted); font-size: .86rem; margin-top: -.7rem; }
   footer { color: var(--muted); font-size: .84rem; border-top: 1px solid #D8DEE9;
            margin-top: 3rem; padding-top: 1rem; }
-  @media (max-width: 34rem) { .board { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 34rem) {
+    .board { grid-template-columns: repeat(2, 1fr); }
+    .hero { flex-direction: column-reverse; gap: .4rem; }
+    .hero img { width: 88px; }
+  }
 </style>
 </head>
 <body>
@@ -71,9 +78,14 @@
 </nav>
 
 <div class="wrap">
-  <p class="eyebrow">Obsidian utility · Windows · Tauri 2</p>
-  <h1>hvelf</h1>
-  <p class="tagline">Old Norse <strong>hvelfa</strong>: to vault, to arch.</p>
+  <div class="hero">
+    <div>
+      <p class="eyebrow">Obsidian utility · Windows · Tauri 2</p>
+      <h1>hvelf</h1>
+      <p class="tagline">Old Norse <strong>hvelfa</strong>: to vault, to arch.</p>
+    </div>
+    <img src="icon-512.png" alt="an arcade of vault doorways, the centre one lit" />
+  </div>
 
   <p>A hotkey-summoned tile board for your <a href="https://obsidian.md">Obsidian</a>
   vaults. Press a key, see your vaults as tiles, hit a number or click. The vault
@@ -89,19 +101,32 @@
     <div class="tile">taxes<span>7</span></div>
     <div class="tile">notes<span>8</span></div>
   </div>
-  <p class="caption">Open vaults carry an aurora edge. Recency puts the last vault you
-  used at <kbd>1</kbd>.</p>
+  <p class="caption">Open vaults carry an aurora edge. Recency puts the vault you were
+  last in at <kbd>1</kbd>.</p>
 
   <p>Obsidian's own vault switcher is modal and slow, and the tray flyout is an
   unlabelled list. If you run many vaults, switching should cost one keystroke and
   one glance. That is all hvelf does.</p>
 
+  <h2>The name and the mark</h2>
+  <p><em>Hvelfa</em> is the Old Norse verb for vaulting: to arch over something (and,
+  said of a boat, to capsize, which feels right for a tool you reach for when you are
+  drowning in windows). Its descendants still carry the meaning today. A Norwegian
+  <em>hvelv</em> is a bank vault; an Icelandic <em>hvelfing</em> is a vaulted ceiling.
+  One old word spans the same pun Obsidian built on: strongrooms that keep valuables,
+  and arches that hold up a roof.</p>
+  <p>The icon is the app doing its job: an arcade of vault doorways, the centre one
+  lit. Summon the board and that is what you see, a row of your vaults with the open
+  ones glowing.</p>
+
   <h2>What it does</h2>
   <div class="card">
   <ul>
-    <li><strong>Summoned on a hotkey.</strong> <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>O</kbd>
-      by default toggles the board; <kbd>Esc</kbd> or focus loss dismisses it. No
-      taskbar clutter, no dock icon.</li>
+    <li><strong>Summoned on a hotkey.</strong> <kbd>Alt</kbd>+<kbd>`</kbd> by default
+      toggles the board; <kbd>Esc</kbd> or focus loss dismisses it. A tray icon gives
+      a mouse path and a quit; there is no taskbar clutter.</li>
+    <li><strong>Quick launch.</strong> An optional second hotkey opens your most
+      recent vault directly, skipping the board entirely.</li>
     <li><strong>Focus or launch.</strong> A tile raises the vault's window if it is
       already open, and opens the vault through Obsidian's <code>obsidian://</code>
       URI if it is not.</li>
@@ -110,8 +135,10 @@
     <li><strong>Close from the board.</strong> Hovering an open tile reveals an
       <code>×</code> that closes that vault's window. It is an ordinary close, so
       Obsidian saves state, and the renderer gives back the RAM it was holding.</li>
-    <li><strong>Recency order.</strong> Tiles sort most-recently-used first, on
-      Obsidian's own timestamps.</li>
+    <li><strong>Recency order.</strong> Tiles sort most-recently-used first. While
+      hvelf runs it tracks which vault window you actually have focused, which beats
+      Obsidian's own timestamps: those only update when a vault is opened, not while
+      you work in it.</li>
     <li><strong>Keyboard first.</strong> <kbd>1</kbd>–<kbd>9</kbd> launch tiles
       directly, typing filters them, <kbd>Enter</kbd> opens the first match,
       <kbd>Ctrl</kbd>+<kbd>Q</kbd> quits.</li>
@@ -136,7 +163,8 @@ cargo build --release</code></pre>
   <h2>Configuration</h2>
   <p><code>%APPDATA%\hvelf\config.json</code>, created with defaults on first run:</p>
 <pre><code>{
-  "hotkey": "ctrl+alt+o",
+  "hotkey": "alt+grave",
+  "quickLaunch": "alt+1",
   "hideOnBlur": true,
   "hide": ["OldVault"],
   "groups": [
@@ -145,18 +173,23 @@ cargo build --release</code></pre>
   ],
   "deepLinks": { "melt": "index" }
 }</code></pre>
-  <p>The config is read at startup, so restart hvelf after editing it. Full field
-  notes are in the <a href="https://github.com/pyatsysh/hvelf#configuration">README</a>.</p>
+  <p>Hotkeys combine <code>ctrl</code>, <code>alt</code>, <code>shift</code> and
+  <code>win</code> with a letter, a digit, an f-key, or <code>grave</code>. The name
+  <code>grave</code> binds the physical key under Esc on any keyboard layout: hvelf
+  registers keys natively by scancode rather than through a US-mapped name table, so
+  it works the same on UK, DE or FR layouts. Field notes for the rest are in the
+  <a href="https://github.com/pyatsysh/hvelf#configuration">README</a>.</p>
 
   <h2>Status</h2>
-  <p>Windows first: window detection and launching are Windows-native so far. The rest
-  is portable Rust, and macOS and Linux are on the roadmap along with a tray icon,
-  autostart and themes.</p>
-  <p>Known limitation: the underlying hotkey library maps key names US-layout-style,
-  so punctuation keys land on different physical keys elsewhere. On a UK layout
-  <code>Backquote</code> is the <code>#~</code> key rather than the key under Esc.
-  Letters and digits are safe on any layout. Binding the physical key regardless of
-  layout needs scancode-based registration, which is on the roadmap.</p>
+  <p>Windows is the supported platform today.</p>
+  <p>On macOS the app compiles and the basics work: vaults are discovered from
+  Obsidian's registry, tiles launch and focus vaults through the
+  <code>obsidian://</code> URI, and the tray menu runs. Three things do not work
+  there yet: the global hotkeys, live open state, and focus-based recency, which
+  falls back to Obsidian's last-opened timestamps. The last two need macOS's
+  accessibility permission to read window titles, so they will arrive
+  permission-gated with a graceful fallback. Until then, treat macOS as launch-only.
+  Linux is untested. Autostart and themes are on the roadmap for every platform.</p>
 
   <footer>
     © Peter Yatsyshin · MIT licence ·
