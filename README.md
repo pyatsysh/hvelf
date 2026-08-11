@@ -12,6 +12,8 @@ Obsidian's own vault switcher is modal and slow, and the tray flyout is an
 unlabelled list. If you run many vaults, switching should cost one keystroke
 and one glance. That is all hvelf does.
 
+The board, and the full description: **[pyatsysh.github.io/hvelf](https://pyatsysh.github.io/hvelf/)**
+
 ## The name and the mark
 
 *Hvelfa* is the Old Norse verb for vaulting: to arch over something (and, said
