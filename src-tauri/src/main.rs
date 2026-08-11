@@ -245,16 +245,45 @@ fn do_launch(app: &AppHandle, cfg: &Config, name: &str) {
     if let Some(file) = cfg.deep_links.get(name) {
         uri.push_str(&format!("&file={}", urlencoding::encode(file)));
     }
-    #[cfg(windows)]
-    let res = std::process::Command::new("explorer.exe").arg(&uri).spawn();
-    #[cfg(target_os = "macos")]
-    let res = std::process::Command::new("open").arg(&uri).spawn();
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let res = std::process::Command::new("xdg-open").arg(&uri).spawn();
-    if let Err(e) = res {
+    open_uri(&uri);
+    hide_window(app.clone());
+}
+
+/// Dispatch a URI through the OS. On Windows this must be ShellExecuteW:
+/// `explorer.exe <uri>` looks like it should work but on current Windows 11
+/// builds it opens a Documents folder instead of the protocol handler.
+#[cfg(windows)]
+fn open_uri(uri: &str) {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    let op: Vec<u16> = "open\0".encode_utf16().collect();
+    let target: Vec<u16> = uri.encode_utf16().chain(std::iter::once(0)).collect();
+    let r = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            op.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            1, // SW_SHOWNORMAL
+        )
+    };
+    if r as isize <= 32 {
+        eprintln!("hvelf: ShellExecuteW failed ({}) for {uri}", r as isize);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_uri(uri: &str) {
+    if let Err(e) = std::process::Command::new("open").arg(uri).spawn() {
         eprintln!("hvelf: failed to launch {uri}: {e}");
     }
-    hide_window(app.clone());
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_uri(uri: &str) {
+    if let Err(e) = std::process::Command::new("xdg-open").arg(uri).spawn() {
+        eprintln!("hvelf: failed to launch {uri}: {e}");
+    }
 }
 
 fn most_recent_vault(cfg: &Config) -> Option<String> {
