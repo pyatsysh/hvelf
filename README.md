@@ -2,8 +2,7 @@
 
 <img src="src-tauri/icons/icon-512.png" width="120" align="right" alt="an arcade of vault doorways, the centre one lit" />
 
-*Old Norse **hvelfa**: to vault, to arch. Its descendants still mean vault:
-Norwegian hvelv is a bank vault, Icelandic hvelfing a vaulted ceiling.*
+*Old Norse **hvelfa**: to vault, to arch.*
 
 A hotkey-summoned tile board for your [Obsidian](https://obsidian.md) vaults.
 Press a key, see your vaults as tiles, hit a number or click. The vault opens,
@@ -12,6 +11,19 @@ or its existing window comes to front, and the board gets out of your way.
 Obsidian's own vault switcher is modal and slow, and the tray flyout is an
 unlabelled list. If you run many vaults, switching should cost one keystroke
 and one glance. That is all hvelf does.
+
+## The name and the mark
+
+*Hvelfa* is the Old Norse verb for vaulting: to arch over something (and, said
+of a boat, to capsize, which feels right for a tool you reach for when you are
+drowning in windows). Its descendants still carry the meaning today. A
+Norwegian *hvelv* is a bank vault; an Icelandic *hvelfing* is a vaulted
+ceiling. One old word spans the same pun Obsidian built on: strongrooms that
+keep valuables, and arches that hold up a roof.
+
+The icon is the app doing its job: an arcade of vault doorways, the centre one
+lit. Summon the board and that is what you see, a row of your vaults with the
+open ones glowing.
 
 ## Features
 

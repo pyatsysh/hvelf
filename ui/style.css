@@ -21,7 +21,30 @@ html, body {
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.55);
 }
 
+#head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+#mark {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  flex: none;
+}
+
+#wordmark {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  color: #8a8794;
+  flex: none;
+  user-select: none;
+}
+
 #filter {
+  flex: 1;
   background: rgba(255, 255, 255, 0.06);
   border: 1px solid rgba(255, 255, 255, 0.10);
   border-radius: 8px;
