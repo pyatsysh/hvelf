@@ -8,6 +8,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
+#[cfg(target_os = "macos")]
+mod hotkey_macos;
+
 // ---------------------------------------------------------------- config
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -113,6 +116,11 @@ struct ObsidianVault {
     /// Last-opened timestamp (ms epoch), maintained by Obsidian itself.
     #[serde(default)]
     ts: u64,
+    /// Obsidian's own record of whether this vault has a window open, and it
+    /// tracks every open vault rather than only the newest. On macOS this is
+    /// where the open state comes from; see open_vault_names.
+    #[serde(default)]
+    open: bool,
 }
 
 fn registered_vaults() -> Vec<(String, String, u64)> {
@@ -233,6 +241,44 @@ fn obsidian_windows() -> Vec<(isize, String)> {
     Vec::new()
 }
 
+/// Which vaults are open, for the indicator on each tile.
+///
+/// Windows reads this off the live window list, which is exact and also
+/// yields the handle needed to focus one. macOS has no equivalent that is
+/// free: both routes to another app's window titles are permission-gated,
+/// the accessibility API and CGWindowList's window names. Obsidian, though,
+/// already records the answer in its own registry and keeps a flag per vault
+/// rather than only for the newest, so the indicator costs nothing here: no
+/// permission, no prompt, no window enumeration.
+///
+/// The flag is written when a vault opens or closes, so it can lag a crash
+/// that leaves it set. It is the indicator that is briefly wrong, which is
+/// the cheapest thing in the app to be wrong.
+#[cfg(target_os = "macos")]
+fn open_vault_names() -> HashSet<String> {
+    let raw = match fs::read_to_string(obsidian_json_path()) {
+        Ok(r) => r,
+        Err(_) => return HashSet::new(),
+    };
+    let reg: ObsidianRegistry = match serde_json::from_str(&raw) {
+        Ok(r) => r,
+        Err(_) => return HashSet::new(),
+    };
+    reg.vaults
+        .values()
+        .filter(|v| v.open)
+        .map(|v| {
+            v.path
+                .replace('\\', "/")
+                .rsplit('/')
+                .next()
+                .unwrap_or(&v.path)
+                .to_string()
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
 fn open_vault_names() -> HashSet<String> {
     obsidian_windows().into_iter().map(|(_, v)| v).collect()
 }
@@ -488,9 +534,17 @@ fn spawn_hotkeys(app: AppHandle, cfg: Config, hist: FocusHistory) {
     });
 }
 
-#[cfg(not(windows))]
+/// macOS registers its chords on the main thread, against the application's
+/// own event target, so there is no second thread and no message pump here.
+/// `setup` is that thread, which is why this is called from there.
+#[cfg(target_os = "macos")]
+fn spawn_hotkeys(app: AppHandle, cfg: Config, hist: FocusHistory) {
+    hotkey_macos::install(app, cfg, hist);
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
 fn spawn_hotkeys(_app: AppHandle, _cfg: Config, _hist: FocusHistory) {
-    eprintln!("hvelf: global hotkeys are Windows-only for now");
+    eprintln!("hvelf: global hotkeys are not implemented on this platform");
 }
 
 #[tauri::command]

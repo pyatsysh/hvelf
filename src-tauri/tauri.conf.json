@@ -26,10 +26,11 @@
     ],
     "security": {
       "csp": null
-    }
+    },
+    "macOSPrivateApi": true
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.ico"]
+    "icon": ["icons/icon.ico", "icons/icon-512.png"]
   }
 }
