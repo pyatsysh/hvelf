@@ -80,7 +80,7 @@
 <div class="wrap">
   <div class="hero">
     <div>
-      <p class="eyebrow">Obsidian utility · Windows · Tauri 2</p>
+      <p class="eyebrow">Obsidian utility · Windows and macOS · Tauri 2</p>
       <h1>hvelf</h1>
       <p class="tagline">Old Norse <strong>hvelfa</strong>: to vault, to arch.</p>
     </div>
@@ -130,8 +130,8 @@
     <li><strong>Focus or launch.</strong> A tile raises the vault's window if it is
       already open, and opens the vault through Obsidian's <code>obsidian://</code>
       URI if it is not.</li>
-    <li><strong>Live state.</strong> Tiles show which vaults are open right now, read
-      from the actual windows rather than from session data that may be stale.</li>
+    <li><strong>Live state.</strong> Tiles show which vaults are open right now: from
+      the live window list on Windows, and from Obsidian's own registry on macOS.</li>
     <li><strong>Close from the board.</strong> Hovering an open tile reveals an
       <code>×</code> that closes that vault's window. It is an ordinary close, so
       Obsidian saves state, and the renderer gives back the RAM it was holding.</li>
@@ -154,11 +154,13 @@
   is nothing to set up and the board always matches what Obsidian knows.</p>
 
   <h2>Build</h2>
-  <p>Requires Rust, with the MSVC toolchain on Windows. No Node, no npm.</p>
+  <p>Requires Rust, with the MSVC toolchain on Windows and the Xcode command line
+  tools on macOS. No Node, no npm.</p>
 <pre><code>cd src-tauri
 cargo build --release</code></pre>
-  <p>The binary lands in <code>src-tauri/target/release/hvelf.exe</code>. Run it once
-  and it sits silent until the hotkey.</p>
+  <p>The binary lands in <code>src-tauri/target/release/</code>, as
+  <code>hvelf.exe</code> on Windows and <code>hvelf</code> on macOS. Run it once and
+  it sits silent until the hotkey.</p>
 
   <h2>Configuration</h2>
   <p><code>%APPDATA%\hvelf\config.json</code>, created with defaults on first run:</p>
@@ -181,15 +183,25 @@ cargo build --release</code></pre>
   <a href="https://github.com/pyatsysh/hvelf#configuration">README</a>.</p>
 
   <h2>Status</h2>
-  <p>Windows is the supported platform today.</p>
-  <p>On macOS the app compiles and the basics work: vaults are discovered from
-  Obsidian's registry, tiles launch and focus vaults through the
-  <code>obsidian://</code> URI, and the tray menu runs. Three things do not work
-  there yet: the global hotkeys, live open state, and focus-based recency, which
-  falls back to Obsidian's last-opened timestamps. The last two need macOS's
-  accessibility permission to read window titles, so they will arrive
-  permission-gated with a graceful fallback. Until then, treat macOS as launch-only.
-  Linux is untested. Autostart and themes are on the roadmap for every platform.</p>
+  <p>Windows and macOS both work. Windows has had the most use; macOS arrived in
+  August 2026 and is tested on one machine.</p>
+  <p>On macOS the hotkey summons and dismisses the board, the tiles list every
+  registered vault, clicking a tile launches it, and the open-vault indicator is
+  correct. The hotkey registers through Carbon rather than an event tap, so it asks
+  for no accessibility permission, and it binds both the ANSI and the ISO code for
+  the key under <kbd>Esc</kbd>, because macOS splits that key in two. Open state is
+  read from Obsidian's own registry, which carries a flag per vault, so that needs no
+  permission either. The flag can outlive a crash, and then the indicator is briefly
+  wrong.</p>
+  <p>Two things are not ported. Raising an already-open vault has no macOS
+  implementation: the click falls through to the <code>obsidian://</code> URI and
+  Obsidian raises its own window, which looks right without being the same code path.
+  Focus-based recency still falls back to Obsidian's last-opened timestamps there,
+  because tracking the focused window is permission-gated.</p>
+  <p>The macOS testing is one machine: an Intel MacBook Pro on macOS 26.6.2 with a UK
+  ISO keyboard, running a debug build from source. There is no bundling or
+  notarisation yet, so no macOS download exists and you build it yourself. Linux is
+  untested. Autostart and themes are on the roadmap for every platform.</p>
 
   <footer>
     © Peter Yatsyshin · MIT licence ·
