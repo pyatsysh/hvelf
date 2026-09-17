@@ -194,8 +194,8 @@ extern "C" fn on_hotkey(
     match id.id % 10 {
         1 => toggle_window(&ctx.app),
         2 => {
-            if let Some(name) = most_recent_vault(&ctx.cfg, &ctx.hist) {
-                do_launch(&ctx.app, &ctx.cfg, &name);
+            if let Some(id) = most_recent_vault(&ctx.cfg, &ctx.hist) {
+                do_launch(&ctx.app, &ctx.cfg, &id);
             }
         }
         _ => {}

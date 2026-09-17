@@ -46,6 +46,39 @@ impl Default for Config {
     }
 }
 
+/// Does a config entry name this vault? Entries are vault names, as they
+/// always have been; a full path also matches, which is the only way to name
+/// one of two vaults that share a name.
+fn entry_matches(entry: &str, v: &Vault) -> bool {
+    entry == v.name || norm_path(entry) == norm_path(&v.path)
+}
+
+fn norm_path(p: &str) -> String {
+    p.replace('\\', "/").trim_end_matches('/').to_lowercase()
+}
+
+impl Config {
+    fn hidden(&self, v: &Vault) -> bool {
+        self.hide.iter().any(|e| entry_matches(e, v))
+    }
+    /// The vault's group: where it sits on the board, and what the heading
+    /// says. Vaults in no group fall into a trailing one.
+    fn group_of(&self, v: &Vault) -> (usize, String) {
+        self.groups
+            .iter()
+            .enumerate()
+            .find(|(_, g)| g.vaults.iter().any(|e| entry_matches(e, v)))
+            .map(|(i, g)| (i, g.name.clone()))
+            .unwrap_or((usize::MAX, String::new()))
+    }
+    fn deep_link(&self, v: &Vault) -> Option<&String> {
+        self.deep_links
+            .iter()
+            .find(|(k, _)| entry_matches(k, v))
+            .map(|(_, file)| file)
+    }
+}
+
 fn config_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -79,7 +112,14 @@ fn load_or_seed_config() -> Config {
 
 #[derive(Serialize, Clone)]
 struct VaultTile {
+    /// Obsidian's own id for the vault, and the handle every command takes:
+    /// see Vault for why the name will not do.
+    id: String,
+    /// The vault name, as Obsidian shows it: its folder.
     name: String,
+    /// What separates this tile from a namesake, empty when it has none;
+    /// see qualifiers.
+    qualifier: String,
     path: String,
     open: bool,
     group: String,
@@ -116,14 +156,101 @@ struct ObsidianVault {
     /// Last-opened timestamp (ms epoch), maintained by Obsidian itself.
     #[serde(default)]
     ts: u64,
-    /// Obsidian's own record of whether this vault has a window open, and it
-    /// tracks every open vault rather than only the newest. On macOS this is
-    /// where the open state comes from; see open_vault_names.
+    /// Whether Obsidian has a window open on this vault; see Vault.
     #[serde(default)]
     open: bool,
 }
 
-fn registered_vaults() -> Vec<(String, String, u64)> {
+/// One vault as Obsidian registers it.
+///
+/// `id` is the key in obsidian.json and the only unique handle hvelf has. A
+/// vault's name is nothing more than the basename of its folder, so two
+/// registered vaults can and do share one, and Obsidian resolves a name in
+/// registry order, arbitrarily from here. Everything that acts on a vault
+/// therefore travels by id.
+#[derive(Clone)]
+struct Vault {
+    id: String,
+    name: String,
+    path: String,
+    ts: u64,
+    /// Obsidian's own record of whether this vault has a window open. It
+    /// keeps the flag per vault rather than only for the newest, and clears
+    /// stale ones when it starts. On macOS this is where open state comes
+    /// from; everywhere it is what tells same-named vaults apart.
+    open: bool,
+}
+
+fn basename(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// Obsidian matches vault names case-insensitively when it resolves a URI,
+/// so two folders differing only in case are one name to it and to hvelf.
+fn same_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
+/// Is another registered vault called the same thing?
+fn shares_name(vaults: &[Vault], v: &Vault) -> bool {
+    vaults
+        .iter()
+        .any(|o| o.id != v.id && same_name(&o.name, &v.name))
+}
+
+/// What each tile says under its name, in the order given, and nothing at
+/// all for a name that is the only one of its kind. Two vaults with the same
+/// name make two identical tiles, which is no use to anyone: the parent
+/// folder is what separates them on sight, and the whole path when even that
+/// repeats.
+fn qualifiers(vaults: &[&Vault]) -> Vec<String> {
+    let mut out: Vec<String> = vaults
+        .iter()
+        .map(|v| {
+            let alone = vaults
+                .iter()
+                .filter(|o| same_name(&o.name, &v.name))
+                .count()
+                < 2;
+            match (alone, parent(&v.path)) {
+                (true, _) => String::new(),
+                (false, Some(p)) => p,
+                (false, None) => v.path.clone(),
+            }
+        })
+        .collect();
+    let repeated: Vec<bool> = vaults
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            !out[i].is_empty()
+                && vaults.iter().enumerate().any(|(j, o)| {
+                    j != i && out[j] == out[i] && same_name(&o.name, &v.name)
+                })
+        })
+        .collect();
+    for (i, r) in repeated.iter().enumerate() {
+        if *r {
+            out[i] = vaults[i].path.clone();
+        }
+    }
+    out
+}
+
+fn parent(path: &str) -> Option<String> {
+    let path = path.replace('\\', "/");
+    let path = path.trim_end_matches('/');
+    let up = &path[..path.rfind('/')?];
+    let name = up.rsplit('/').next().unwrap_or(up);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+fn registered_vaults() -> Vec<Vault> {
     let raw = match fs::read_to_string(obsidian_json_path()) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
@@ -133,16 +260,13 @@ fn registered_vaults() -> Vec<(String, String, u64)> {
         Err(_) => return Vec::new(),
     };
     reg.vaults
-        .values()
-        .map(|v| {
-            let name = v
-                .path
-                .replace('\\', "/")
-                .rsplit('/')
-                .next()
-                .unwrap_or(&v.path)
-                .to_string();
-            (name, v.path.clone(), v.ts)
+        .into_iter()
+        .map(|(id, v)| Vault {
+            id,
+            name: basename(&v.path),
+            path: v.path,
+            ts: v.ts,
+            open: v.open,
         })
         .collect()
 }
@@ -241,122 +365,147 @@ fn obsidian_windows() -> Vec<(isize, String)> {
     Vec::new()
 }
 
-/// Which vaults are open, for the indicator on each tile.
+/// Which vaults are open, for the indicator on each tile, by id.
 ///
-/// Windows reads this off the live window list, which is exact and also
-/// yields the handle needed to focus one. macOS has no equivalent that is
-/// free: both routes to another app's window titles are permission-gated,
-/// the accessibility API and CGWindowList's window names. Obsidian, though,
-/// already records the answer in its own registry and keeps a flag per vault
-/// rather than only for the newest, so the indicator costs nothing here: no
-/// permission, no prompt, no window enumeration.
+/// macOS has no free equivalent of the window list: both routes to another
+/// app's window titles are permission-gated, the accessibility API and
+/// CGWindowList's window names. Obsidian, though, already records the answer
+/// in its own registry and keeps a flag per vault rather than only for the
+/// newest, so the indicator costs nothing here: no permission, no prompt, no
+/// window enumeration.
 ///
 /// The flag is written when a vault opens or closes, so it can lag a crash
 /// that leaves it set. It is the indicator that is briefly wrong, which is
 /// the cheapest thing in the app to be wrong.
 #[cfg(target_os = "macos")]
-fn open_vault_names() -> HashSet<String> {
-    let raw = match fs::read_to_string(obsidian_json_path()) {
-        Ok(r) => r,
-        Err(_) => return HashSet::new(),
-    };
-    let reg: ObsidianRegistry = match serde_json::from_str(&raw) {
-        Ok(r) => r,
-        Err(_) => return HashSet::new(),
-    };
-    reg.vaults
-        .values()
+fn open_ids(vaults: &[Vault]) -> HashSet<String> {
+    vaults
+        .iter()
         .filter(|v| v.open)
-        .map(|v| {
-            v.path
-                .replace('\\', "/")
-                .rsplit('/')
-                .next()
-                .unwrap_or(&v.path)
-                .to_string()
-        })
+        .map(|v| v.id.clone())
         .collect()
 }
 
+/// Windows reads open state off the live window list, which is exact and
+/// also yields the handle needed to focus or close a window. A title carries
+/// the vault's name and not its id, though, so when two vaults share a name
+/// the list alone cannot say which of them is open: Obsidian's own per-id
+/// flag breaks that tie. A window still has to exist either way, which is
+/// what keeps a flag left set by a crash from lighting a dot.
 #[cfg(not(target_os = "macos"))]
-fn open_vault_names() -> HashSet<String> {
-    obsidian_windows().into_iter().map(|(_, v)| v).collect()
+fn open_ids(vaults: &[Vault]) -> HashSet<String> {
+    let titled: Vec<String> = obsidian_windows().into_iter().map(|(_, v)| v).collect();
+    vaults
+        .iter()
+        .filter(|v| titled.iter().any(|t| same_name(t, &v.name)))
+        .filter(|v| v.open || !shares_name(vaults, v))
+        .map(|v| v.id.clone())
+        .collect()
+}
+
+/// The window belonging to one vault, when it can be told apart. Titles read
+/// "<note> - <vault> - Obsidian <version>", so for two same-named vaults
+/// only Obsidian's per-id flag says which window is whose; when both are
+/// open nothing does, and hvelf would rather leave a window alone than raise
+/// or close the wrong one.
+fn window_for(vaults: &[Vault], v: &Vault) -> Option<isize> {
+    let wins: Vec<isize> = obsidian_windows()
+        .into_iter()
+        .filter(|(_, t)| same_name(t, &v.name))
+        .map(|(h, _)| h)
+        .collect();
+    if !shares_name(vaults, v) {
+        return wins.first().copied();
+    }
+    let sibling_open = vaults
+        .iter()
+        .any(|o| o.id != v.id && same_name(&o.name, &v.name) && o.open);
+    match wins.as_slice() {
+        [only] if v.open && !sibling_open => Some(*only),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------- commands
 
 #[tauri::command]
 fn list_vaults(cfg: State<Config>, hist: State<FocusHistory>) -> Vec<VaultTile> {
-    let open = open_vault_names();
-    let hidden: HashSet<&String> = cfg.hide.iter().collect();
-    let mut group_of: HashMap<&String, &String> = HashMap::new();
-    for g in &cfg.groups {
-        for v in &g.vaults {
-            group_of.insert(v, &g.name);
-        }
-    }
+    // Open state is read against the whole registry, since a hidden vault
+    // still has a window and its title is indistinguishable from its
+    // namesake's; labels are only about what the board shows.
+    let all = registered_vaults();
+    let open = open_ids(&all);
+    let shown: Vec<&Vault> = all.iter().filter(|v| !cfg.hidden(v)).collect();
     // Rank by whichever is newer: Obsidian's last-opened stamp or hvelf's
     // own last-focused record. Groups keep config order; recency within.
-    let mut ranked: Vec<(VaultTile, u64)> = registered_vaults()
-        .into_iter()
-        .filter(|(name, _, _)| !hidden.contains(name))
-        .map(|(name, path, ts)| {
-            let eff = ts.max(hist.get(&name));
+    let mut ranked: Vec<(usize, u64, VaultTile)> = shown
+        .iter()
+        .zip(qualifiers(&shown))
+        .map(|(v, qualifier)| {
+            let (pos, group) = cfg.group_of(v);
+            let eff = v.ts.max(focused_ts(&hist, &all, v));
             (
-                VaultTile {
-                    open: open.contains(&name),
-                    group: group_of.get(&name).map(|s| s.to_string()).unwrap_or_default(),
-                    name,
-                    path,
-                },
+                pos,
                 eff,
+                VaultTile {
+                    id: v.id.clone(),
+                    name: v.name.clone(),
+                    qualifier,
+                    path: v.path.clone(),
+                    open: open.contains(&v.id),
+                    group,
+                },
             )
         })
         .collect();
-    let order: HashMap<&String, usize> =
-        cfg.groups.iter().enumerate().map(|(i, g)| (&g.name, i)).collect();
-    ranked.sort_by_key(|(t, eff)| {
-        (
-            order.get(&t.group).copied().unwrap_or(usize::MAX),
-            std::cmp::Reverse(*eff),
-        )
-    });
-    ranked.into_iter().map(|(t, _)| t).collect()
+    ranked.sort_by_key(|(pos, eff, _)| (*pos, std::cmp::Reverse(*eff)));
+    ranked.into_iter().map(|(_, _, t)| t).collect()
 }
 
 /// Close a vault's window gracefully (WM_CLOSE: same as clicking its X;
 /// Obsidian saves state and releases the vault's renderer memory).
 #[tauri::command]
 #[allow(unused_variables)]
-fn close_vault(name: String) {
+fn close_vault(id: String) {
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
-        for (h, v) in obsidian_windows() {
-            if v == name {
-                unsafe {
-                    PostMessageW(h as _, WM_CLOSE, 0, 0);
-                }
+        let all = registered_vaults();
+        if let Some(h) = all
+            .iter()
+            .find(|v| v.id == id)
+            .and_then(|v| window_for(&all, v))
+        {
+            unsafe {
+                PostMessageW(h as _, WM_CLOSE, 0, 0);
             }
         }
     }
 }
 
-fn do_launch(app: &AppHandle, cfg: &Config, name: &str) {
+fn do_launch(app: &AppHandle, cfg: &Config, id: &str) {
     hide_window(app.clone());
+    let all = registered_vaults();
+    let v = match all.iter().find(|v| v.id == id) {
+        Some(v) => v,
+        None => return,
+    };
     // An already-open vault is focused by hvelf itself: as the recipient of
     // the user's hotkey or click, hvelf holds the foreground-change rights
     // that Windows denies to a background Obsidian asked via URI. The URI
     // path serves vaults with no window yet, and deep links which must
     // navigate inside the vault.
-    if !cfg.deep_links.contains_key(name) {
-        if let Some((h, _)) = obsidian_windows().into_iter().find(|(_, v)| v == name) {
+    if cfg.deep_link(v).is_none() {
+        if let Some(h) = window_for(&all, v) {
             focus_window(h);
             return;
         }
     }
-    let mut uri = format!("obsidian://open?vault={}", urlencoding::encode(name));
-    if let Some(file) = cfg.deep_links.get(name) {
+    // By id, not by name: Obsidian's resolver takes either, checks the id
+    // first, and would otherwise pick whichever same-named vault its
+    // registry happens to list first.
+    let mut uri = format!("obsidian://open?vault={}", urlencoding::encode(&v.id));
+    if let Some(file) = cfg.deep_link(v) {
         uri.push_str(&format!("&file={}", urlencoding::encode(file)));
     }
     open_uri(&uri);
@@ -415,17 +564,28 @@ fn open_uri(uri: &str) {
     }
 }
 
+/// hvelf's own last-focused stamp for a vault. The stamp is filed under the
+/// name in the window title, which two vaults can share, so it only counts
+/// for one Obsidian records as open: a shut vault cannot inherit the recency
+/// of the namesake being worked in.
+fn focused_ts(hist: &FocusHistory, vaults: &[Vault], v: &Vault) -> u64 {
+    if shares_name(vaults, v) && !v.open {
+        return 0;
+    }
+    hist.get(&v.name)
+}
+
 fn most_recent_vault(cfg: &Config, hist: &FocusHistory) -> Option<String> {
-    registered_vaults()
-        .into_iter()
-        .filter(|(name, _, _)| !cfg.hide.contains(name))
-        .max_by_key(|(name, _, ts)| (*ts).max(hist.get(name)))
-        .map(|(name, _, _)| name)
+    let all = registered_vaults();
+    all.iter()
+        .filter(|v| !cfg.hidden(v))
+        .max_by_key(|v| v.ts.max(focused_ts(hist, &all, v)))
+        .map(|v| v.id.clone())
 }
 
 #[tauri::command]
-fn launch(app: AppHandle, cfg: State<Config>, name: String) {
-    do_launch(&app, cfg.inner(), &name);
+fn launch(app: AppHandle, cfg: State<Config>, id: String) {
+    do_launch(&app, cfg.inner(), &id);
 }
 
 // ------------------------------------------------------- global hotkeys

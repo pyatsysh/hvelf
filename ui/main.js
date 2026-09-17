@@ -19,7 +19,11 @@ async function refresh() {
 
 function render() {
   const q = filterEl.value.trim().toLowerCase();
-  visible = tiles.filter((t) => !q || t.name.toLowerCase().includes(q));
+  // The qualifier is filterable too: typing the parent folder is how you
+  // pick between two vaults of the same name.
+  visible = tiles.filter(
+    (t) => !q || `${t.name} ${t.qualifier || ""}`.toLowerCase().includes(q),
+  );
 
   const byGroup = new Map();
   for (const t of visible) {
@@ -45,16 +49,18 @@ function render() {
       tile.innerHTML =
         `<span class="badge">${idx <= 9 ? idx : ""}</span>` +
         `<span class="dot"></span>` +
-        `<span class="name">${t.name}</span>` +
+        `<span class="label"><span class="name">${t.name}</span>` +
+        (t.qualifier ? `<span class="qual">${t.qualifier}</span>` : "") +
+        `</span>` +
         (t.open ? `<span class="close" title="close vault (frees its RAM)">×</span>` : "");
       tile.addEventListener("click", (e) => {
         if (e.target.classList.contains("close")) {
           e.stopPropagation();
-          invoke("close_vault", { name: t.name });
+          invoke("close_vault", { id: t.id });
           setTimeout(refresh, 700); // give the window a moment to die
           return;
         }
-        launch(t.name);
+        launch(t.id);
       });
       grid.appendChild(tile);
     }
@@ -66,8 +72,10 @@ function render() {
   }
 }
 
-function launch(name) {
-  invoke("launch", { name });
+// Tiles travel by Obsidian's vault id: two vaults can share a name, and
+// the label on a tile may carry a qualifier that no vault answers to.
+function launch(id) {
+  invoke("launch", { id });
   filterEl.value = "";
 }
 
@@ -82,7 +90,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Enter" && visible.length > 0) {
-    launch(visible[0].name);
+    launch(visible[0].id);
     return;
   }
   // Digits are quick picks while the filter is empty; once the user has
@@ -90,7 +98,7 @@ document.addEventListener("keydown", (e) => {
   if (/^[1-9]$/.test(e.key) && filterEl.value === "") {
     e.preventDefault();
     const i = parseInt(e.key, 10) - 1;
-    if (visible[i]) launch(visible[i].name);
+    if (visible[i]) launch(visible[i].id);
     return;
   }
   // Anything printable focuses the filter so you can just start typing.

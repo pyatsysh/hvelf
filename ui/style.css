@@ -103,7 +103,22 @@ section h2 {
 }
 .tile.open .dot { background: #58c472; box-shadow: 0 0 6px rgba(88, 196, 114, 0.7); }
 
+.tile .label {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .tile .name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Two vaults can share a name; the parent folder tells them apart. */
+.tile .qual {
+  font-size: 10px;
+  color: #6f6c7a;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
