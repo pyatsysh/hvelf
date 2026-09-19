@@ -41,6 +41,10 @@ open ones glowing.
 - **Close from the board**: hovering an open tile reveals an `×` that closes
   that vault's window. It is an ordinary close, so Obsidian saves state, and
   the renderer gives back the RAM it was holding.
+- **Remove from the board**: on a vault that is not open, the same `×` takes
+  its tile off the board, for vaults that have gone stale. The first click
+  asks and the second removes. The vault's path goes into `hide` in the config
+  and Obsidian is left alone; deleting the entry brings the tile back.
 - **Recency order**: tiles sort most-recently-used first, so `1` is always
   the vault you were last in. While hvelf runs it tracks which vault window
   you actually have focused, which beats Obsidian's own timestamps: those
@@ -94,12 +98,14 @@ sits silent until the hotkey.
   through a US-mapped name table, so it works the same on UK, DE or FR
   layouts. `quickLaunch` may be empty to disable it.
 - `groups` order the board. Vaults you do not list fall into a trailing group.
-- `hide` removes a vault's tile without touching Obsidian.
+- `hide` removes a vault's tile without touching Obsidian. The `×` on a tile
+  adds the vault here for you, by its path.
 - `deepLinks` make a tile open a specific note, via `&file=` in the URI.
 - Entries in `hide`, `groups` and `deepLinks` name a vault by its name, or by
   its full path, which is the only way to name one of two vaults that share a
   name (`"hide": ["D:\\delme\\moreland-dispute"]`).
-- The config is read at startup, so restart hvelf after editing it.
+- The config is read at startup, so restart hvelf after editing it by hand. A
+  tile removed from the board is gone at once.
 
 ## Status
 

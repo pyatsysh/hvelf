@@ -140,9 +140,17 @@ section h2 {
   padding: 2px 6px;
   color: #8a8794;
 }
-.tile.open:hover .close { display: block; }
-.tile.open:hover .badge { display: none; }
+.tile:hover .close { display: block; }
+.tile:hover .badge { display: none; }
 .tile .close:hover { color: #e06c75; }
+
+/* A tile asked to leave the board, waiting for the second click. */
+.tile.armed, .tile.armed:hover {
+  background: rgba(224, 108, 117, 0.14);
+  border-color: rgba(224, 108, 117, 0.55);
+}
+.tile.armed .close { color: #e06c75; }
+.tile.armed .name { color: #e8a0a6; }
 
 #hint {
   margin-top: 8px;

@@ -52,15 +52,37 @@ function render() {
         `<span class="label"><span class="name">${t.name}</span>` +
         (t.qualifier ? `<span class="qual">${t.qualifier}</span>` : "") +
         `</span>` +
-        (t.open ? `<span class="close" title="close vault (frees its RAM)">×</span>` : "");
+        // One cross, two jobs: on an open vault it closes the window, on a
+        // shut one it takes the tile off the board.
+        (t.open
+          ? `<span class="close" title="close vault (frees its RAM)">×</span>`
+          : `<span class="close" title="remove from the board">×</span>`);
       tile.addEventListener("click", (e) => {
         if (e.target.classList.contains("close")) {
           e.stopPropagation();
-          invoke("close_vault", { id: t.id });
-          setTimeout(refresh, 700); // give the window a moment to die
+          if (t.open) {
+            invoke("close_vault", { id: t.id });
+            setTimeout(refresh, 700); // give the window a moment to die
+          } else if (tile.classList.contains("armed")) {
+            invoke("hide_vault", { id: t.id }).then(refresh, (err) => {
+              groupsEl.innerHTML = `<p class="err">${err}</p>`;
+            });
+          } else {
+            // Removal asks twice. The grid closes up after a tile goes, so
+            // a stray second click would land on the next vault's cross.
+            tile.classList.add("armed");
+            tile.querySelector(".name").textContent = "remove from board?";
+          }
+          return;
+        }
+        if (tile.classList.contains("armed")) {
+          render(); // a click anywhere else on the tile is a no
           return;
         }
         launch(t.id);
+      });
+      tile.addEventListener("mouseleave", () => {
+        if (tile.classList.contains("armed")) render();
       });
       grid.appendChild(tile);
     }

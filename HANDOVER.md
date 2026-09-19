@@ -17,8 +17,25 @@ The running Windows binary is **not** built from this checkout. It is built
 from a hand copy of branch `keep` at `%USERPROFILE%\projects\hvelf`, whose
 `src-tauri/target` holds the warm build. The copy is not a git checkout, so it
 drifts silently: after changing anything here, copy the changed files across
-and rebuild, or it keeps running the old code. As of 2026-09-10 the copy
+and rebuild, or it keeps running the old code. As of 2026-09-18 the copy
 matches `keep` exactly.
+
+The running binary holds `target\release\hvelf.exe` open, and `deps\hvelf.exe`
+is a hard link to the same file, so the linker cannot write either. Rename both
+aside before `cargo build --release` (`hvelf-prev-running.exe` is the last
+binary, kept as the way back), then stop the tray app and start it again from
+its Startup shortcut.
+
+## Removing a tile
+
+A tile's `×` closes the window of an open vault and, on a shut one, takes the
+tile off the board after a second click. The removal is `hide_vault`: the
+vault's path is appended to `hide` in `config.json`, edited as plain JSON so
+the user's key order and unknown keys survive, and to the running config,
+which the hotkey handlers share, so the vault leaves quick launch at once.
+The change is on both `main` and `keep`. The macOS side of it
+(`hotkey_macos.rs` taking the shared config) has never been compiled: this box
+has no macOS toolchain.
 
 ## Vault identity
 

@@ -21,7 +21,7 @@ use std::os::raw::c_int;
 
 use tauri::AppHandle;
 
-use crate::{do_launch, most_recent_vault, toggle_window, Config, FocusHistory};
+use crate::{do_launch, most_recent_vault, toggle_window, FocusHistory, SharedConfig};
 
 // ------------------------------------------------------------------ carbon
 
@@ -159,7 +159,7 @@ pub fn parse_hotkey(s: &str) -> Option<HotSpec> {
 
 struct Ctx {
     app: AppHandle,
-    cfg: Config,
+    cfg: SharedConfig,
     hist: FocusHistory,
 }
 
@@ -194,8 +194,9 @@ extern "C" fn on_hotkey(
     match id.id % 10 {
         1 => toggle_window(&ctx.app),
         2 => {
-            if let Some(id) = most_recent_vault(&ctx.cfg, &ctx.hist) {
-                do_launch(&ctx.app, &ctx.cfg, &id);
+            let cfg = ctx.cfg.get();
+            if let Some(id) = most_recent_vault(&cfg, &ctx.hist) {
+                do_launch(&ctx.app, &cfg, &id);
             }
         }
         _ => {}
@@ -209,10 +210,12 @@ extern "C" fn on_hotkey(
 /// to the application event target, and it is the app's own run loop that
 /// dispatches to it. Unlike the Windows path there is no private thread and
 /// no message pump of our own to write.
-pub fn install(app: AppHandle, cfg: Config, hist: FocusHistory) {
+pub fn install(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
+    // The chords are bound once, from the config as it stood at startup.
+    let boot = cfg.get();
     let ctx = Box::into_raw(Box::new(Ctx {
         app,
-        cfg: cfg.clone(),
+        cfg,
         hist,
     })) as *mut c_void;
 
@@ -264,7 +267,7 @@ pub fn install(app: AppHandle, cfg: Config, hist: FocusHistory) {
             }
         };
 
-        register("hotkey", &cfg.hotkey, 1);
-        register("quickLaunch", &cfg.quick_launch, 2);
+        register("hotkey", &boot.hotkey, 1);
+        register("quickLaunch", &boot.quick_launch, 2);
     }
 }

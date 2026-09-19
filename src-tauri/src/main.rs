@@ -79,6 +79,18 @@ impl Config {
     }
 }
 
+/// The config as the running app holds it: read once at startup, and changed
+/// after that only by the board hiding a vault. The hotkey handlers hold the
+/// same copy, so a vault taken off the board is out of quick launch too.
+#[derive(Clone)]
+struct SharedConfig(std::sync::Arc<std::sync::Mutex<Config>>);
+
+impl SharedConfig {
+    fn get(&self) -> Config {
+        self.0.lock().unwrap().clone()
+    }
+}
+
 fn config_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -106,6 +118,29 @@ fn load_or_seed_config() -> Config {
         return cfg;
     }
     Config::default()
+}
+
+/// Add one entry to `hide` in config.json. The file is edited as the JSON it
+/// is rather than written back from Config, so the user's key order survives,
+/// and so does any key this build does not know.
+fn persist_hidden(entry: &str) -> Result<(), String> {
+    let path = config_dir().join("config.json");
+    let raw = fs::read_to_string(&path).map_err(|e| format!("cannot read config.json: {e}"))?;
+    let mut doc: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|e| format!("config.json invalid ({e})"))?;
+    doc.as_object_mut()
+        .ok_or("config.json is not an object")?
+        .entry("hide")
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or("`hide` in config.json is not a list")?
+        .push(entry.into());
+    // Written beside the file and renamed over it, since a half-written
+    // config would cost the user their hotkeys and groups.
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap())
+        .and_then(|_| fs::rename(&tmp, &path))
+        .map_err(|e| format!("cannot write config.json: {e}"))
 }
 
 // ---------------------------------------------------------------- vaults
@@ -429,7 +464,8 @@ fn window_for(vaults: &[Vault], v: &Vault) -> Option<isize> {
 // ---------------------------------------------------------------- commands
 
 #[tauri::command]
-fn list_vaults(cfg: State<Config>, hist: State<FocusHistory>) -> Vec<VaultTile> {
+fn list_vaults(cfg: State<SharedConfig>, hist: State<FocusHistory>) -> Vec<VaultTile> {
+    let cfg = cfg.get();
     // Open state is read against the whole registry, since a hidden vault
     // still has a window and its title is indistinguishable from its
     // namesake's; labels are only about what the board shows.
@@ -481,6 +517,22 @@ fn close_vault(id: String) {
             }
         }
     }
+}
+
+/// Take a vault off the board for good. Its path goes into `hide`, in the
+/// running config and in config.json: the path rather than the name, so a
+/// namesake keeps its tile. Obsidian's registry is left alone, and deleting
+/// the entry from config.json brings the tile back.
+#[tauri::command]
+fn hide_vault(cfg: State<SharedConfig>, id: String) -> Result<(), String> {
+    let all = registered_vaults();
+    let v = all.iter().find(|v| v.id == id).ok_or("no such vault")?;
+    let mut cfg = cfg.0.lock().unwrap();
+    if !cfg.hidden(v) {
+        persist_hidden(&v.path)?;
+        cfg.hide.push(v.path.clone());
+    }
+    Ok(())
 }
 
 fn do_launch(app: &AppHandle, cfg: &Config, id: &str) {
@@ -584,8 +636,8 @@ fn most_recent_vault(cfg: &Config, hist: &FocusHistory) -> Option<String> {
 }
 
 #[tauri::command]
-fn launch(app: AppHandle, cfg: State<Config>, id: String) {
-    do_launch(&app, cfg.inner(), &id);
+fn launch(app: AppHandle, cfg: State<SharedConfig>, id: String) {
+    do_launch(&app, &cfg.get(), &id);
 }
 
 // ------------------------------------------------------- global hotkeys
@@ -641,29 +693,31 @@ fn parse_hotkey(s: &str) -> Option<HotSpec> {
 }
 
 #[cfg(windows)]
-fn spawn_hotkeys(app: AppHandle, cfg: Config, hist: FocusHistory) {
+fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
     std::thread::spawn(move || unsafe {
         use windows_sys::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, MOD_NOREPEAT};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
             GetMessageW, SetTimer, MSG, WM_HOTKEY, WM_TIMER,
         };
 
-        match parse_hotkey(&cfg.hotkey) {
+        // The chords are bound once, from the config as it stood at startup.
+        let boot = cfg.get();
+        match parse_hotkey(&boot.hotkey) {
             Some(h) => {
                 if RegisterHotKey(std::ptr::null_mut(), 1, h.mods | MOD_NOREPEAT, h.vk) == 0 {
-                    eprintln!("hvelf: hotkey '{}' is taken by another app", cfg.hotkey);
+                    eprintln!("hvelf: hotkey '{}' is taken by another app", boot.hotkey);
                 }
             }
-            None => eprintln!("hvelf: cannot parse hotkey '{}'", cfg.hotkey),
+            None => eprintln!("hvelf: cannot parse hotkey '{}'", boot.hotkey),
         }
-        if !cfg.quick_launch.is_empty() {
-            match parse_hotkey(&cfg.quick_launch) {
+        if !boot.quick_launch.is_empty() {
+            match parse_hotkey(&boot.quick_launch) {
                 Some(h) => {
                     if RegisterHotKey(std::ptr::null_mut(), 2, h.mods | MOD_NOREPEAT, h.vk) == 0 {
-                        eprintln!("hvelf: quickLaunch '{}' is taken by another app", cfg.quick_launch);
+                        eprintln!("hvelf: quickLaunch '{}' is taken by another app", boot.quick_launch);
                     }
                 }
-                None => eprintln!("hvelf: cannot parse quickLaunch '{}'", cfg.quick_launch),
+                None => eprintln!("hvelf: cannot parse quickLaunch '{}'", boot.quick_launch),
             }
         }
 
@@ -677,6 +731,7 @@ fn spawn_hotkeys(app: AppHandle, cfg: Config, hist: FocusHistory) {
                 WM_HOTKEY => match msg.wParam {
                     1 => toggle_window(&app),
                     2 => {
+                        let cfg = cfg.get();
                         if let Some(name) = most_recent_vault(&cfg, &hist) {
                             do_launch(&app, &cfg, &name);
                         }
@@ -698,12 +753,12 @@ fn spawn_hotkeys(app: AppHandle, cfg: Config, hist: FocusHistory) {
 /// own event target, so there is no second thread and no message pump here.
 /// `setup` is that thread, which is why this is called from there.
 #[cfg(target_os = "macos")]
-fn spawn_hotkeys(app: AppHandle, cfg: Config, hist: FocusHistory) {
+fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
     hotkey_macos::install(app, cfg, hist);
 }
 
 #[cfg(all(not(windows), not(target_os = "macos")))]
-fn spawn_hotkeys(_app: AppHandle, _cfg: Config, _hist: FocusHistory) {
+fn spawn_hotkeys(_app: AppHandle, _cfg: SharedConfig, _hist: FocusHistory) {
     eprintln!("hvelf: global hotkeys are not implemented on this platform");
 }
 
@@ -772,11 +827,11 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             toggle_window(app);
         }))
-        .manage(cfg)
+        .manage(SharedConfig(std::sync::Arc::new(std::sync::Mutex::new(cfg))))
         .manage(FocusHistory::default())
         .setup(|app| {
             build_tray(app)?;
-            let cfg = app.state::<Config>().inner().clone();
+            let cfg = app.state::<SharedConfig>().inner().clone();
             let hist = app.state::<FocusHistory>().inner().clone();
             spawn_hotkeys(app.handle().clone(), cfg, hist);
             Ok(())
@@ -792,6 +847,7 @@ fn main() {
             list_vaults,
             launch,
             close_vault,
+            hide_vault,
             hide_window,
             quit
         ])
