@@ -80,7 +80,7 @@
 <div class="wrap">
   <div class="hero">
     <div>
-      <p class="eyebrow">Obsidian utility · Windows and macOS · Tauri 2</p>
+      <p class="eyebrow">Obsidian utility · Windows, macOS and Linux · Tauri 2</p>
       <h1>hvelf</h1>
       <p class="tagline">Old Norse <strong>hvelfa</strong>: to vault, to arch.</p>
     </div>
@@ -164,7 +164,7 @@
 
   <h2>Build</h2>
   <p>Requires Rust, with the MSVC toolchain on Windows and the Xcode command line
-  tools on macOS. No Node, no npm.</p>
+  tools on macOS. A binary-only build needs no Node or npm; installer packaging uses the pinned npm tooling.</p>
 <pre><code>cd src-tauri
 cargo build --release</code></pre>
   <p>The binary lands in <code>src-tauri/target/release/</code>, as
@@ -209,8 +209,7 @@ cargo build --release</code></pre>
   because tracking the focused window is permission-gated.</p>
   <p>The macOS testing is one machine: an Intel MacBook Pro on macOS 26.6.2 with a UK
   ISO keyboard, running a debug build from source. There is no bundling or
-  notarisation yet, so no macOS download exists and you build it yourself. Linux is
-  untested. Autostart and themes are on the roadmap for every platform.</p>
+  notarisation yet, so macOS packages remain drafts until reviewed. See <a href="https://github.com/pyatsysh/hvelf/blob/main/RELEASING.md">builds and releases</a>. Linux builds and its automated tests run under WSL, including X11 protocol tests on a virtual display. Native Linux desktop acceptance is pending. On Wayland, bind <code>hvelf --toggle</code> in the desktop settings; portal binding and compositor window control are not implemented. The current changes still need Windows and macOS regression checks. Autostart and themes remain on the roadmap.</p>
 
   <footer>
     © Peter Yatsyshin · MIT licence ·

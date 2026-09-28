@@ -160,3 +160,9 @@ section h2 {
 }
 
 .err { color: #c47272; font-size: 13px; padding: 12px; }
+
+/* Open according to Obsidian's registry only (not observed live): a ring,
+   not a lit dot, so a stale flag never reads as a live window. */
+.tile.open.reported .dot { background: transparent; box-shadow: none; border: 1.5px solid #58c472; }
+#notice { margin: 0 0 8px; }
+#hint .limits { cursor: help; opacity: 0.8; }

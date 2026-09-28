@@ -29,6 +29,9 @@ open ones glowing.
 
 ## Features
 
+Window observation, hotkeys and window control depend on the desktop. The
+[status matrix](#status) lists the available behaviour for each platform.
+
 - **Summoned on a hotkey**: `` Alt+` `` by default toggles the board; `Esc` or
   focus loss dismisses it. A tray icon gives a mouse path and a quit; there is
   no taskbar clutter.
@@ -58,25 +61,36 @@ open ones glowing.
   so a copy of `moreland-dispute` somewhere else is a second vault with the
   same name. hvelf labels the two by their parent folder and acts on
   Obsidian's vault id, so the tile you press is the vault you get.
-- **Light**: one small binary on Tauri 2 and WebView2, with no Electron and no
-  background CPU.
+- **Light**: one small binary on Tauri 2 (WebView2 on Windows, WebKitGTK on
+  Linux), with no Electron and no background CPU.
 
 Vaults come from Obsidian's own registry (`obsidian.json`), so there is nothing
 to set up and the board always matches what Obsidian knows.
 
 ## Build
 
-Requires Rust, with the MSVC toolchain on Windows. No Node, no npm.
+Requires Rust, with the MSVC toolchain on Windows and the Xcode command line
+tools on macOS. A binary-only build needs no Node or npm:
 
-    cd src-tauri
-    cargo build --release
+    cargo build --release --locked --manifest-path src-tauri/Cargo.toml
 
-The binary lands in `src-tauri/target/release/hvelf.exe`. Run it once and it
-sits silent until the hotkey.
+The binary lands in `src-tauri/target/release/`: `hvelf.exe` on Windows or
+`hvelf` on Linux and macOS. For installers, use the pinned npm tooling in
+[RELEASING.md](RELEASING.md).
+
+On Linux (Ubuntu 24.04 names) the build needs the WebKitGTK 4.1 stack:
+
+    sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev \
+      libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev
+
+and at run time `xdg-utils` (for `xdg-open`/`xdg-mime`), a D-Bus session and
+`libayatana-appindicator3-1` for the tray.
 
 ## Configuration
 
-`%APPDATA%\hvelf\config.json`, created with defaults on first run:
+`%APPDATA%\hvelf\config.json` on Windows, `${XDG_CONFIG_HOME:-~/.config}/hvelf/config.json`
+on Linux and `~/.config/hvelf/config.json` on macOS, created with defaults on
+first run:
 
 ```json
 {
@@ -109,20 +123,54 @@ sits silent until the hotkey.
 
 ## Status
 
-Windows is the supported platform today.
+Windows is the reference platform. The Linux changes have not yet been rebuilt
+and exercised on Windows or macOS; the build workflow checks both platforms.
 
-On macOS the app compiles and the basics work: vaults are discovered from
-Obsidian's registry, tiles launch and focus vaults through the `obsidian://`
-URI, and the tray menu runs. Three things do not work there yet:
+**macOS**: vaults are discovered from Obsidian's registry, tiles launch
+through the `obsidian://` URI, the tray runs, and the summon and quick-launch
+hotkeys are registered through Carbon (`hotkey_macos.rs`), with the ISO and
+ANSI grave keys both bound. Open state comes from Obsidian's own per-vault
+flags, so the board labels it as reported rather than observed. hvelf does not
+raise or close another application's window on macOS, and recency falls back
+to Obsidian's last-opened stamps.
 
-- the global hotkeys (summon and quick launch): a small port, planned first;
-- live open state (the green dots and the close button);
-- focus-based recency, which falls back to Obsidian's last-opened timestamps.
+**Linux**: what works depends on the session, and `hvelf --capabilities`
+prints the matrix for the one you are in.
 
-The last two need macOS's accessibility permission to read window titles, so
-they will arrive permission-gated with a graceful fallback. Until then, treat
-macOS as launch-only. Linux is untested. Autostart and themes are on the
-roadmap for every platform.
+| | X11 with an EWMH window manager | Wayland (GNOME, KDE) | no display |
+|---|---|---|---|
+| vaults from `obsidian.json` (XDG, `~/.config`, Flatpak, Snap) | yes | yes | yes |
+| open through `obsidian://` (`xdg-open`, else `gio open`) | yes | yes | handler permitting |
+| open dots | observed from `_NET_CLIENT_LIST` | reported from Obsidian's flags | reported |
+| raise an open vault | `_NET_ACTIVE_WINDOW` | asked of Obsidian through the URI; the compositor may only flag it | no |
+| close from the board | polite `_NET_CLOSE_WINDOW` | unsupported: the cross only removes the tile | no |
+| focus recency | active window every 2 s | Obsidian's stamps only | Obsidian's stamps only |
+| global hotkey | grabbed by keycode on the root window | bind `hvelf --toggle` as a desktop shortcut | none |
+
+hvelf currently uses EWMH for window observation and control, which applies to
+X11. It has no Wayland compositor integration for those operations. Global
+shortcuts are a separate feature: the desktop portal provides an API on
+supported desktops, but this build only detects that API and does not bind
+through it. Closing on X11 is a request handled by Obsidian, never a process
+kill, and hvelf does not edit vault files.
+
+A running board takes commands from a second invocation over D-Bus:
+`hvelf --toggle`, `--show`, `--hide`, `--quick-launch` and `--quit`. Bind
+`hvelf --toggle` to a key in the desktop's own settings (GNOME: Settings,
+Keyboard, View and Customise Shortcuts, Custom Shortcuts; KDE: System
+Settings, Shortcuts, Add Command). GNOME binds Alt plus the key above Tab to
+switching between an application's windows by default, which is the same
+physical key as `alt+grave`: pick another chord, or free that one first. On
+X11 hvelf reports such a clash as a limit under the board instead of failing
+silently. The xdg-desktop-portal GlobalShortcuts route is detected but not yet
+used. Autostart is not installed; add a desktop entry to
+`~/.config/autostart` yourself if you want it.
+
+## Builds and releases
+
+See [RELEASING.md](RELEASING.md) for Linux prerequisites, locked builds,
+installer artifacts and draft releases. Linux desktop behaviour remains under
+qualification; the observed GUI checks so far used a virtual X display in WSL.
 
 ## Licence
 

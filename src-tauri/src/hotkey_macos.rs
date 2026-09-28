@@ -21,7 +21,7 @@ use std::os::raw::c_int;
 
 use tauri::AppHandle;
 
-use crate::{do_launch, most_recent_vault, toggle_window, FocusHistory, SharedConfig};
+use crate::{launch_or_tell, most_recent_vault, toggle_window, FocusHistory, SharedConfig};
 
 // ------------------------------------------------------------------ carbon
 
@@ -196,7 +196,7 @@ extern "C" fn on_hotkey(
         2 => {
             let cfg = ctx.cfg.get();
             if let Some(id) = most_recent_vault(&cfg, &ctx.hist) {
-                do_launch(&ctx.app, &cfg, &id);
+                launch_or_tell(&ctx.app, &cfg, &id);
             }
         }
         _ => {}

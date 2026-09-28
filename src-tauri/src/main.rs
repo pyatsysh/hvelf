@@ -10,6 +10,52 @@ use tauri::{AppHandle, Manager, State};
 
 #[cfg(target_os = "macos")]
 mod hotkey_macos;
+#[cfg(target_os = "linux")]
+mod linux;
+
+// ------------------------------------------------------- shared vocabulary
+
+/// The error envelope the board shows: `{"ok": false, "code", "message",
+/// "feature"}`. An action that cannot run says why instead of pretending.
+#[derive(Serialize, Clone, Debug)]
+pub struct Failure {
+    ok: bool,
+    code: &'static str,
+    message: String,
+    feature: &'static str,
+}
+
+impl Failure {
+    pub fn new(code: &'static str, message: impl Into<String>, feature: &'static str) -> Failure {
+        Failure { ok: false, code, message: message.into(), feature }
+    }
+}
+
+/// One platform capability as the board and `hvelf --capabilities` report
+/// it: state is available, degraded, unavailable, unsupported, disabled or
+/// unknown, and anything short of available carries its reason.
+#[derive(Serialize, Clone, Debug)]
+pub struct Capability {
+    capability: &'static str,
+    state: &'static str,
+    reason: String,
+    source: String,
+    platform: &'static str,
+}
+
+/// Capability records found at runtime (chord grabs, tray), added to the
+/// static probes when the board asks.
+#[derive(Clone, Default)]
+struct RuntimeCaps(std::sync::Arc<std::sync::Mutex<Vec<Capability>>>);
+
+impl RuntimeCaps {
+    #[allow(dead_code)]
+    fn record(&self, c: Capability) {
+        let mut v = self.0.lock().unwrap();
+        v.retain(|o| o.capability != c.capability);
+        v.push(c);
+    }
+}
 
 // ---------------------------------------------------------------- config
 
@@ -54,7 +100,25 @@ fn entry_matches(entry: &str, v: &Vault) -> bool {
 }
 
 fn norm_path(p: &str) -> String {
-    p.replace('\\', "/").trim_end_matches('/').to_lowercase()
+    let p = slashes(p);
+    let p = p.trim_end_matches('/');
+    // Linux paths are case-sensitive: two vaults differing only in case are
+    // two vaults there, while Windows and macOS fold case by default.
+    if cfg!(target_os = "linux") {
+        p.to_string()
+    } else {
+        p.to_lowercase()
+    }
+}
+
+/// Paths with `/` separators. Only Windows uses a backslash as one; on
+/// Linux and macOS it is an ordinary character a folder name may contain.
+fn slashes(p: &str) -> String {
+    if cfg!(windows) {
+        p.replace('\\', "/")
+    } else {
+        p.to_string()
+    }
 }
 
 impl Config {
@@ -96,7 +160,11 @@ fn config_dir() -> PathBuf {
     {
         PathBuf::from(std::env::var("APPDATA").expect("APPDATA not set")).join("hvelf")
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::config_home().join("hvelf")
+    }
+    #[cfg(all(not(windows), not(target_os = "linux")))]
     {
         PathBuf::from(std::env::var("HOME").expect("HOME not set"))
             .join(".config")
@@ -157,6 +225,10 @@ struct VaultTile {
     qualifier: String,
     path: String,
     open: bool,
+    /// `observed` or `reported`; see open_confidence.
+    open_state: &'static str,
+    /// Why the cross cannot close this vault's window here; empty when it can.
+    close_reason: String,
     group: String,
 }
 
@@ -172,7 +244,11 @@ fn obsidian_json_path() -> PathBuf {
         PathBuf::from(std::env::var("HOME").expect("HOME not set"))
             .join("Library/Application Support/obsidian/obsidian.json")
     }
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::registry().0
+    }
+    #[cfg(all(unix, not(target_os = "macos"), not(target_os = "linux")))]
     {
         PathBuf::from(std::env::var("HOME").expect("HOME not set"))
             .join(".config/obsidian/obsidian.json")
@@ -217,7 +293,7 @@ struct Vault {
 }
 
 fn basename(path: &str) -> String {
-    path.replace('\\', "/")
+    slashes(path)
         .trim_end_matches('/')
         .rsplit('/')
         .next()
@@ -278,7 +354,7 @@ fn qualifiers(vaults: &[&Vault]) -> Vec<String> {
 }
 
 fn parent(path: &str) -> Option<String> {
-    let path = path.replace('\\', "/");
+    let path = slashes(path);
     let path = path.trim_end_matches('/');
     let up = &path[..path.rfind('/')?];
     let name = up.rsplit('/').next().unwrap_or(up);
@@ -286,14 +362,27 @@ fn parent(path: &str) -> Option<String> {
 }
 
 fn registered_vaults() -> Vec<Vault> {
-    let raw = match fs::read_to_string(obsidian_json_path()) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
-    let reg: ObsidianRegistry = match serde_json::from_str(&raw) {
-        Ok(r) => r,
-        Err(_) => return Vec::new(),
-    };
+    load_registry().unwrap_or_default()
+}
+
+/// The registry, or why there is none: a missing file and a malformed one are
+/// different faults and the board names each.
+fn load_registry() -> Result<Vec<Vault>, Failure> {
+    let path = obsidian_json_path();
+    let raw = fs::read_to_string(&path).map_err(|e| {
+        Failure::new(
+            "missing-input",
+            format!("no Obsidian vault registry at {} ({e}); is Obsidian installed and run once?", path.display()),
+            "vault-registry",
+        )
+    })?;
+    let reg: ObsidianRegistry = serde_json::from_str(&raw).map_err(|e| {
+        Failure::new("malformed-data", format!("{} is not a vault registry: {e}", path.display()), "vault-registry")
+    })?;
+    Ok(vaults_from(reg))
+}
+
+fn vaults_from(reg: ObsidianRegistry) -> Vec<Vault> {
     reg.vaults
         .into_iter()
         .map(|(id, v)| Vault {
@@ -395,7 +484,24 @@ fn obsidian_windows() -> Vec<(isize, String)> {
         .collect()
 }
 
-#[cfg(not(windows))]
+/// Linux reads the same titles off the window manager's `_NET_CLIENT_LIST`
+/// on X11. Wayland publishes no such list, so there it is empty and open
+/// state falls back to Obsidian's flags, labelled as reported.
+#[cfg(target_os = "linux")]
+fn obsidian_windows() -> Vec<(isize, String)> {
+    if linux::session() != linux::Session::X11 {
+        return Vec::new();
+    }
+    match linux::x11::Ewmh::connect(None).and_then(|w| w.titled_windows()) {
+        Ok(wins) => wins
+            .into_iter()
+            .filter_map(|(w, t)| vault_from_title(&t).map(|v| (w as isize, v)))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
 fn obsidian_windows() -> Vec<(isize, String)> {
     Vec::new()
 }
@@ -428,7 +534,7 @@ fn open_ids(vaults: &[Vault]) -> HashSet<String> {
 /// flag breaks that tie. A window still has to exist either way, which is
 /// what keeps a flag left set by a crash from lighting a dot.
 #[cfg(not(target_os = "macos"))]
-fn open_ids(vaults: &[Vault]) -> HashSet<String> {
+fn open_ids_observed(vaults: &[Vault]) -> HashSet<String> {
     let titled: Vec<String> = obsidian_windows().into_iter().map(|(_, v)| v).collect();
     vaults
         .iter()
@@ -436,6 +542,73 @@ fn open_ids(vaults: &[Vault]) -> HashSet<String> {
         .filter(|v| v.open || !shares_name(vaults, v))
         .map(|v| v.id.clone())
         .collect()
+}
+
+#[cfg(windows)]
+fn open_ids(vaults: &[Vault]) -> HashSet<String> {
+    open_ids_observed(vaults)
+}
+
+/// Linux observes windows where the session lets it (X11 with a window
+/// manager publishing EWMH) and otherwise falls back to Obsidian's flags,
+/// which are then reported, not observed.
+#[cfg(target_os = "linux")]
+fn open_ids(vaults: &[Vault]) -> HashSet<String> {
+    if window_observation() {
+        open_ids_observed(vaults)
+    } else {
+        vaults.iter().filter(|v| v.open).map(|v| v.id.clone()).collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn window_observation() -> bool {
+    linux::session() == linux::Session::X11
+        && linux::x11::Ewmh::connect(None).map(|w| w.client_list().is_ok()).unwrap_or(false)
+}
+
+/// How far the open dots can be trusted: `observed` from live windows,
+/// `reported` from Obsidian's own flags, which a crash can leave set.
+fn open_confidence() -> &'static str {
+    #[cfg(windows)]
+    {
+        "observed"
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "reported"
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if window_observation() {
+            "observed"
+        } else {
+            "reported"
+        }
+    }
+}
+
+/// Why the board cannot close a vault's window here, empty when it can.
+fn close_unavailable() -> String {
+    #[cfg(windows)]
+    {
+        String::new()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        "closing another application's window is not implemented on macOS".into()
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let wc = linux::window_control();
+        if wc.close {
+            String::new()
+        } else if wc.reason.is_empty() {
+            "the window manager does not support _NET_CLOSE_WINDOW".into()
+        } else {
+            wc.reason
+        }
+    }
 }
 
 /// The window belonging to one vault, when it can be told apart. Titles read
@@ -464,13 +637,17 @@ fn window_for(vaults: &[Vault], v: &Vault) -> Option<isize> {
 // ---------------------------------------------------------------- commands
 
 #[tauri::command]
-fn list_vaults(cfg: State<SharedConfig>, hist: State<FocusHistory>) -> Vec<VaultTile> {
-    let cfg = cfg.get();
+fn list_vaults(cfg: State<SharedConfig>, hist: State<FocusHistory>) -> Result<Vec<VaultTile>, Failure> {
+    Ok(tiles(&cfg.get(), &hist, load_registry()?))
+}
+
+fn tiles(cfg: &Config, hist: &FocusHistory, all: Vec<Vault>) -> Vec<VaultTile> {
     // Open state is read against the whole registry, since a hidden vault
     // still has a window and its title is indistinguishable from its
     // namesake's; labels are only about what the board shows.
-    let all = registered_vaults();
     let open = open_ids(&all);
+    let open_state = open_confidence();
+    let close_reason = close_unavailable();
     let shown: Vec<&Vault> = all.iter().filter(|v| !cfg.hidden(v)).collect();
     // Rank by whichever is newer: Obsidian's last-opened stamp or hvelf's
     // own last-focused record. Groups keep config order; recency within.
@@ -479,7 +656,7 @@ fn list_vaults(cfg: State<SharedConfig>, hist: State<FocusHistory>) -> Vec<Vault
         .zip(qualifiers(&shown))
         .map(|(v, qualifier)| {
             let (pos, group) = cfg.group_of(v);
-            let eff = v.ts.max(focused_ts(&hist, &all, v));
+            let eff = v.ts.max(focused_ts(hist, &all, v));
             (
                 pos,
                 eff,
@@ -489,6 +666,8 @@ fn list_vaults(cfg: State<SharedConfig>, hist: State<FocusHistory>) -> Vec<Vault
                     qualifier,
                     path: v.path.clone(),
                     open: open.contains(&v.id),
+                    open_state,
+                    close_reason: close_reason.clone(),
                     group,
                 },
             )
@@ -502,7 +681,32 @@ fn list_vaults(cfg: State<SharedConfig>, hist: State<FocusHistory>) -> Vec<Vault
 /// Obsidian saves state and releases the vault's renderer memory).
 #[tauri::command]
 #[allow(unused_variables)]
-fn close_vault(id: String) {
+fn close_vault(id: String) -> Result<(), Failure> {
+    #[cfg(target_os = "linux")]
+    {
+        let reason = close_unavailable();
+        if !reason.is_empty() {
+            return Err(Failure::new(
+                if linux::session() == linux::Session::Wayland { "unsupported-session" } else { "disabled" },
+                format!("hvelf cannot close vault windows here: {reason}. Close it in Obsidian."),
+                "close-window",
+            ));
+        }
+        let all = registered_vaults();
+        let v = all.iter().find(|v| v.id == id).ok_or_else(|| Failure::new("missing-input", "no such vault", "close-window"))?;
+        // Never a process kill: a polite request that Obsidian answers by
+        // saving and closing, exactly as its own close button does.
+        let h = window_for(&all, v).ok_or_else(|| {
+            Failure::new(
+                "missing-input",
+                "no window can be told apart for this vault (not open, or it shares its name with another open vault)",
+                "close-window",
+            )
+        })?;
+        return linux::x11::Ewmh::connect(None)
+            .and_then(|w| w.request_close(h as u32))
+            .map_err(|e| Failure::new("io-error", e, "close-window"));
+    }
     #[cfg(windows)]
     {
         use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
@@ -517,6 +721,8 @@ fn close_vault(id: String) {
             }
         }
     }
+    #[allow(unreachable_code)]
+    Ok(())
 }
 
 /// Take a vault off the board for good. Its path goes into `hide`, in the
@@ -535,12 +741,12 @@ fn hide_vault(cfg: State<SharedConfig>, id: String) -> Result<(), String> {
     Ok(())
 }
 
-fn do_launch(app: &AppHandle, cfg: &Config, id: &str) {
+fn do_launch(app: &AppHandle, cfg: &Config, id: &str) -> Result<(), Failure> {
     hide_window(app.clone());
     let all = registered_vaults();
     let v = match all.iter().find(|v| v.id == id) {
         Some(v) => v,
-        None => return,
+        None => return Err(Failure::new("missing-input", "that vault is no longer in Obsidian's registry", "open-vault")),
     };
     // An already-open vault is focused by hvelf itself: as the recipient of
     // the user's hotkey or click, hvelf holds the foreground-change rights
@@ -550,7 +756,7 @@ fn do_launch(app: &AppHandle, cfg: &Config, id: &str) {
     if cfg.deep_link(v).is_none() {
         if let Some(h) = window_for(&all, v) {
             focus_window(h);
-            return;
+            return Ok(());
         }
     }
     // By id, not by name: Obsidian's resolver takes either, checks the id
@@ -560,7 +766,15 @@ fn do_launch(app: &AppHandle, cfg: &Config, id: &str) {
     if let Some(file) = cfg.deep_link(v) {
         uri.push_str(&format!("&file={}", urlencoding::encode(file)));
     }
-    open_uri(&uri);
+    #[cfg(target_os = "linux")]
+    {
+        linux::open_uri(&uri, std::env::var("PATH").ok().as_deref())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        open_uri(&uri);
+        Ok(())
+    }
 }
 
 #[cfg(windows)]
@@ -576,7 +790,14 @@ fn focus_window(hwnd: isize) {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn focus_window(hwnd: isize) {
+    if let Err(e) = linux::x11::Ewmh::connect(None).and_then(|w| w.request_activate(hwnd as u32)) {
+        eprintln!("hvelf: cannot raise window: {e}");
+    }
+}
+
+#[cfg(all(not(windows), not(target_os = "linux")))]
 fn focus_window(_hwnd: isize) {}
 
 /// Dispatch a URI through the OS. On Windows this must be ShellExecuteW:
@@ -609,7 +830,7 @@ fn open_uri(uri: &str) {
     }
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(all(unix, not(target_os = "macos"), not(target_os = "linux")))]
 fn open_uri(uri: &str) {
     if let Err(e) = std::process::Command::new("xdg-open").arg(uri).spawn() {
         eprintln!("hvelf: failed to launch {uri}: {e}");
@@ -636,8 +857,32 @@ fn most_recent_vault(cfg: &Config, hist: &FocusHistory) -> Option<String> {
 }
 
 #[tauri::command]
-fn launch(app: AppHandle, cfg: State<SharedConfig>, id: String) {
-    do_launch(&app, &cfg.get(), &id);
+fn launch(app: AppHandle, cfg: State<SharedConfig>, id: String) -> Result<(), Failure> {
+    do_launch(&app, &cfg.get(), &id)
+}
+
+/// A launch that nobody invoked from the board (a chord, a command line):
+/// its failure is shown on the board rather than lost on stderr.
+fn launch_or_tell(app: &AppHandle, cfg: &Config, id: &str) {
+    if let Err(f) = do_launch(app, cfg, id) {
+        eprintln!("hvelf: {}: {}", f.code, f.message);
+        use tauri::Emitter;
+        let _ = app.emit("hvelf-notice", f);
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }
+}
+
+#[tauri::command]
+fn capabilities(runtime: State<RuntimeCaps>) -> Vec<Capability> {
+    #[allow(unused_mut)]
+    let mut out: Vec<Capability> = Vec::new();
+    #[cfg(target_os = "linux")]
+    out.extend(linux::capabilities());
+    out.extend(runtime.0.lock().unwrap().iter().cloned());
+    out
 }
 
 // ------------------------------------------------------- global hotkeys
@@ -733,7 +978,7 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
                     2 => {
                         let cfg = cfg.get();
                         if let Some(name) = most_recent_vault(&cfg, &hist) {
-                            do_launch(&app, &cfg, &name);
+                            launch_or_tell(&app, &cfg, &name);
                         }
                     }
                     _ => {}
@@ -757,7 +1002,92 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
     hotkey_macos::install(app, cfg, hist);
 }
 
-#[cfg(all(not(windows), not(target_os = "macos")))]
+/// Linux: on X11 the chords are grabbed on the root window by keycode, and
+/// the active window is sampled for recency, as on Windows. X11 key grabs do
+/// not cover a Wayland desktop, so there the board is summoned by a desktop
+/// shortcut bound to `hvelf --toggle`; the capability records say which
+/// route this session has.
+#[cfg(target_os = "linux")]
+fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
+    let caps = app.state::<RuntimeCaps>().inner().clone();
+    let session = linux::session();
+    if session != linux::Session::X11 {
+        let reason = match session {
+            linux::Session::Wayland => "X11 key grabs do not cover a Wayland desktop; portal binding is not implemented, so bind `hvelf --toggle` as a desktop shortcut",
+            _ => "no graphical session",
+        };
+        caps.record(linux::cap("global-hotkey-x11", if session == linux::Session::Wayland { "unsupported" } else { "unavailable" }, reason, "XGrabKey"));
+        return;
+    }
+    let boot = cfg.get();
+    std::thread::spawn(move || {
+        let g = match linux::x11::Grabber::connect(None) {
+            Ok(g) => g,
+            Err(e) => {
+                caps.record(linux::cap("global-hotkey-x11", "unavailable", e, "XGrabKey"));
+                return;
+            }
+        };
+        let mut chords = Vec::new();
+        let mut notes = Vec::new();
+        for (slot, spec) in [(1u8, boot.hotkey.clone()), (2u8, boot.quick_launch.clone())] {
+            if spec.is_empty() {
+                continue;
+            }
+            match linux::x11::parse_chord(&spec, |s| g.keycode_for(s)) {
+                None => notes.push(format!("cannot parse '{spec}'")),
+                Some(c) => match g.grab(c) {
+                    Ok(()) => chords.push((slot, c)),
+                    Err(linux::x11::GrabFailure::Conflict) => notes.push(format!("'{spec}' is already grabbed by another application")),
+                    Err(linux::x11::GrabFailure::Other(e)) => notes.push(format!("'{spec}': {e}")),
+                },
+            }
+        }
+        let state = if notes.is_empty() { "available" } else if chords.is_empty() { "unavailable" } else { "degraded" };
+        let reason = if notes.is_empty() {
+            "chords grabbed on the root window by keycode; `grave` is the physical key under Esc".to_string()
+        } else {
+            notes.join("; ")
+        };
+        caps.record(linux::cap("global-hotkey-x11", state, reason, "XGrabKey"));
+
+        // Recency: which vault window the user is in, every 2 s, on its own
+        // connection so a blocked event wait never starves it.
+        let sampler_hist = hist.clone();
+        std::thread::spawn(move || {
+            let Ok(w) = linux::x11::Ewmh::connect(None) else { return };
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(2));
+                if let Some(v) = w.active_window().and_then(|a| w.title(a)).and_then(|t| vault_from_title(&t)) {
+                    sampler_hist.note(v);
+                }
+            }
+        });
+
+        let specs: Vec<linux::x11::Chord> = chords.iter().map(|(_, c)| *c).collect();
+        while let Some(i) = g.next_press(&specs) {
+            match chords[i].0 {
+                1 => {
+                    let app2 = app.clone();
+                    let _ = app.run_on_main_thread(move || toggle_window(&app2));
+                }
+                _ => {
+                    let app2 = app.clone();
+                    let cfg2 = cfg.clone();
+                    let hist2 = hist.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        let c = cfg2.get();
+                        if let Some(id) = most_recent_vault(&c, &hist2) {
+                            launch_or_tell(&app2, &c, &id);
+                        }
+                    });
+                }
+            }
+        }
+    });
+}
+
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 fn spawn_hotkeys(_app: AppHandle, _cfg: SharedConfig, _hist: FocusHistory) {
     eprintln!("hvelf: global hotkeys are not implemented on this platform");
 }
@@ -819,21 +1149,165 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+// ------------------------------------------------------------ command line
+//
+// A second `hvelf` hands its arguments to the running one (the single-
+// instance plugin) and exits, so these double as the command a desktop
+// shortcut binds where no global chord can be grabbed. No argument keeps
+// the old meaning: toggle the board.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    Toggle,
+    Show,
+    Hide,
+    QuickLaunch,
+    Quit,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Cli {
+    Run(Option<Action>),
+    Capabilities,
+    ListVaults,
+    Help,
+}
+
+const USAGE: &str = "usage: hvelf [--toggle | --show | --hide | --quick-launch | --quit | --capabilities | --list-vaults | --help]";
+
+fn parse_cli(args: &[String]) -> Result<Cli, String> {
+    let mut out = Cli::Run(None);
+    for a in args.iter().skip(1) {
+        let next = match a.as_str() {
+            "--toggle" => Cli::Run(Some(Action::Toggle)),
+            "--show" => Cli::Run(Some(Action::Show)),
+            "--hide" => Cli::Run(Some(Action::Hide)),
+            "--quick-launch" => Cli::Run(Some(Action::QuickLaunch)),
+            "--quit" => Cli::Run(Some(Action::Quit)),
+            "--capabilities" => Cli::Capabilities,
+            "--list-vaults" => Cli::ListVaults,
+            "-h" | "--help" => Cli::Help,
+            other => return Err(format!("unknown argument {other:?}")),
+        };
+        if out != Cli::Run(None) {
+            return Err("give at most one argument".into());
+        }
+        out = next;
+    }
+    Ok(out)
+}
+
+fn perform(app: &AppHandle, action: Action) {
+    match action {
+        Action::Toggle => toggle_window(app),
+        Action::Show => {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }
+        Action::Hide => hide_window(app.clone()),
+        Action::Quit => app.exit(0),
+        Action::QuickLaunch => {
+            let cfg = app.state::<SharedConfig>().get();
+            let hist = app.state::<FocusHistory>().inner().clone();
+            if let Some(id) = most_recent_vault(&cfg, &hist) {
+                launch_or_tell(app, &cfg, &id);
+            }
+        }
+    }
+}
+
+fn single_instance_plugin() -> Option<tauri::plugin::TauriPlugin<tauri::Wry>> {
+    #[cfg(target_os = "linux")]
+    if !linux::session_bus_available() {
+        eprintln!("hvelf: no D-Bus session bus; running without single-instance forwarding");
+        return None;
+    }
+    Some(tauri_plugin_single_instance::init(|app, argv, _cwd| {
+        match parse_cli(&argv) {
+            Ok(Cli::Run(Some(a))) => perform(app, a),
+            _ => toggle_window(app),
+        }
+    }))
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let initial = match parse_cli(&args) {
+        Ok(Cli::Run(a)) => a,
+        Ok(Cli::Help) => {
+            println!("{USAGE}");
+            return;
+        }
+        Ok(Cli::Capabilities) => {
+            #[allow(unused_mut)]
+            let mut caps: Vec<Capability> = Vec::new();
+            #[cfg(target_os = "linux")]
+            caps.extend(linux::capabilities());
+            println!("{}", serde_json::to_string_pretty(&caps).unwrap());
+            return;
+        }
+        Ok(Cli::ListVaults) => {
+            // Names, paths, ids and open state only; never vault contents.
+            match load_registry() {
+                Ok(all) => {
+                    let t = tiles(&load_or_seed_config(), &FocusHistory::default(), all);
+                    println!("{}", serde_json::to_string_pretty(&t).unwrap());
+                }
+                Err(f) => {
+                    eprintln!("{}", serde_json::to_string(&f).unwrap());
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        Err(e) => {
+            eprintln!("hvelf: {e}\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
+
     let cfg = load_or_seed_config();
     let hide_on_blur = cfg.hide_on_blur;
+    let runtime_caps = RuntimeCaps::default();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            toggle_window(app);
-        }))
+    let mut builder = tauri::Builder::default();
+    if let Some(p) = single_instance_plugin() {
+        builder = builder.plugin(p);
+    } else {
+        #[cfg(target_os = "linux")]
+        runtime_caps.record(linux::cap(
+            "single-instance",
+            "unavailable",
+            "no D-Bus session bus: a second hvelf starts a second board instead of reaching this one",
+            "tauri-plugin-single-instance",
+        ));
+    }
+    builder
         .manage(SharedConfig(std::sync::Arc::new(std::sync::Mutex::new(cfg))))
         .manage(FocusHistory::default())
-        .setup(|app| {
+        .manage(runtime_caps)
+        .setup(move |app| {
+            // The tray loads its indicator library at run time on Linux; a
+            // desktop without one keeps the board, reachable by command.
+            #[cfg(target_os = "linux")]
+            {
+                let caps = app.state::<RuntimeCaps>().inner().clone();
+                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_tray(app))) {
+                    Ok(Ok(())) => caps.record(linux::cap("tray", "available", "StatusNotifierItem through libayatana-appindicator; GNOME shows it only with the AppIndicator extension enabled", "tray-icon")),
+                    Ok(Err(e)) => caps.record(linux::cap("tray", "unavailable", format!("tray failed: {e}"), "tray-icon")),
+                    Err(_) => caps.record(linux::cap("tray", "unavailable", "no appindicator library could be loaded; install libayatana-appindicator3-1", "tray-icon")),
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
             build_tray(app)?;
             let cfg = app.state::<SharedConfig>().inner().clone();
             let hist = app.state::<FocusHistory>().inner().clone();
             spawn_hotkeys(app.handle().clone(), cfg, hist);
+            if let Some(a) = initial {
+                perform(app.handle(), a);
+            }
             Ok(())
         })
         .on_window_event(move |window, event| {
@@ -849,8 +1323,109 @@ fn main() {
             close_vault,
             hide_vault,
             hide_window,
+            capabilities,
             quit
         ])
         .run(tauri::generate_context!())
         .expect("hvelf: failed to start");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        std::iter::once("hvelf").chain(a.iter().copied()).map(String::from).collect()
+    }
+
+    #[test]
+    fn command_line_actions() {
+        assert_eq!(parse_cli(&args(&[])), Ok(Cli::Run(None)));
+        assert_eq!(parse_cli(&args(&["--toggle"])), Ok(Cli::Run(Some(Action::Toggle))));
+        assert_eq!(parse_cli(&args(&["--quick-launch"])), Ok(Cli::Run(Some(Action::QuickLaunch))));
+        assert_eq!(parse_cli(&args(&["--capabilities"])), Ok(Cli::Capabilities));
+        assert!(parse_cli(&args(&["--toggle", "--quit"])).is_err());
+        assert!(parse_cli(&args(&["obsidian://open?vault=x; rm -rf ~"])).is_err());
+    }
+
+    fn vault(id: &str, path: &str, open: bool) -> Vault {
+        Vault { id: id.into(), name: basename(path), path: path.into(), ts: 0, open }
+    }
+
+    #[test]
+    fn duplicate_basenames_keep_distinct_ids_and_qualifiers() {
+        let reg: ObsidianRegistry = serde_json::from_str(r#"{"vaults":{
+            "a1b2c3d4e5f60718":{"path":"/home/p q/Lab/Vaults/Research/notes","ts":2,"open":true},
+            "0918273645abcdef":{"path":"/home/p q/archive/notes","ts":1},
+            "ffffeeee00001111":{"path":"/home/p q/Ünïcode \"quoted\" vault","ts":3}
+        }}"#).unwrap();
+        let all = vaults_from(reg);
+        let cfg = Config::default();
+        let t = tiles(&cfg, &FocusHistory::default(), all);
+        let ids: HashSet<&str> = t.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(ids.len(), 3);
+        let notes: Vec<&VaultTile> = t.iter().filter(|x| x.name == "notes").collect();
+        assert_eq!(notes.len(), 2);
+        let quals: HashSet<&str> = notes.iter().map(|x| x.qualifier.as_str()).collect();
+        assert_eq!(quals, HashSet::from(["Research", "archive"]));
+        let odd = t.iter().find(|x| x.id == "ffffeeee00001111").unwrap();
+        assert_eq!(odd.name, "Ünïcode \"quoted\" vault");
+        assert_eq!(odd.qualifier, "");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn backslash_is_a_name_character_and_case_matters_on_linux() {
+        assert_eq!(basename("/v/a\\b"), "a\\b");
+        assert_eq!(parent("/v/x\\y/notes").as_deref(), Some("x\\y"));
+        let v = vault("1", "/home/p/Notes", false);
+        assert!(!entry_matches("/home/p/notes", &v));
+        assert!(entry_matches("/home/p/Notes/", &v));
+    }
+
+    #[test]
+    fn launch_uri_carries_the_id_not_the_name() {
+        // The URI builder in do_launch encodes the id; mirror it here.
+        let id = "a1b2c3d4e5f60718";
+        let uri = format!("obsidian://open?vault={}", urlencoding::encode(id));
+        assert_eq!(uri, "obsidian://open?vault=a1b2c3d4e5f60718");
+        let file = "Daily notes/2026 \"q\" é.md";
+        assert_eq!(urlencoding::encode(file), "Daily%20notes%2F2026%20%22q%22%20%C3%A9.md");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn without_window_observation_open_flags_are_reported_not_observed() {
+        if linux::session() == linux::Session::X11 && window_observation() {
+            eprintln!("skipped: this X session publishes a client list");
+            return;
+        }
+        let all = vec![vault("1", "/v/a", true), vault("2", "/v/b", false)];
+        let open = open_ids(&all);
+        assert_eq!(open, HashSet::from(["1".to_string()]));
+        assert_eq!(open_confidence(), "reported");
+        assert!(!close_unavailable().is_empty());
+    }
+
+    #[test]
+    fn hiding_by_path_survives_restart_and_keeps_unknown_keys() {
+        let dir = std::env::temp_dir().join(format!("hvelf-cfg-{} é 'q'", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"zeta":1,"hotkey":"alt+grave","hide":[]}"#).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        doc["hide"].as_array_mut().unwrap().push("/home/p q/archive/notes".into());
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        let back: Config = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let v = vault("0918273645abcdef", "/home/p q/archive/notes", false);
+        let twin = vault("a1b2c3d4e5f60718", "/home/p q/Lab/notes", false);
+        assert!(back.hidden(&v));
+        assert!(!back.hidden(&twin));
+        let keys: Vec<String> = serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(&path).unwrap())
+            .unwrap().as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["zeta", "hotkey", "hide"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

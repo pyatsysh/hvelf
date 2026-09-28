@@ -30,7 +30,17 @@
     "macOSPrivateApi": true
   },
   "bundle": {
-    "active": false,
-    "icon": ["icons/icon.ico", "icons/icon-512.png"]
+    "active": true,
+    "icon": [
+      "icons/icon.ico",
+      "icons/icon-512.png"
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "xdg-utils"
+        ]
+      }
+    }
   }
 }
