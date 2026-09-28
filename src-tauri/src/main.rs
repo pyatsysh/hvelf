@@ -3,7 +3,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
@@ -188,27 +188,31 @@ fn load_or_seed_config() -> Config {
     Config::default()
 }
 
-/// Add one entry to `hide` in config.json. The file is edited as the JSON it
-/// is rather than written back from Config, so the user's key order survives,
-/// and so does any key this build does not know.
-fn persist_hidden(entry: &str) -> Result<(), String> {
-    let path = config_dir().join("config.json");
-    let raw = fs::read_to_string(&path).map_err(|e| format!("cannot read config.json: {e}"))?;
+/// Change `hide` in config.json. The file is edited as the JSON it is rather
+/// than written back from Config, so the user's key order survives, and so
+/// does any key this build does not know.
+fn edit_hide(path: &Path, edit: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(), String> {
+    let raw = fs::read_to_string(path).map_err(|e| format!("cannot read config.json: {e}"))?;
     let mut doc: serde_json::Value =
         serde_json::from_str(&raw).map_err(|e| format!("config.json invalid ({e})"))?;
-    doc.as_object_mut()
-        .ok_or("config.json is not an object")?
-        .entry("hide")
-        .or_insert_with(|| serde_json::Value::Array(Vec::new()))
-        .as_array_mut()
-        .ok_or("`hide` in config.json is not a list")?
-        .push(entry.into());
+    edit(
+        doc.as_object_mut()
+            .ok_or("config.json is not an object")?
+            .entry("hide")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .ok_or("`hide` in config.json is not a list")?,
+    );
     // Written beside the file and renamed over it, since a half-written
     // config would cost the user their hotkeys and groups.
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, serde_json::to_string_pretty(&doc).unwrap())
-        .and_then(|_| fs::rename(&tmp, &path))
+        .and_then(|_| fs::rename(&tmp, path))
         .map_err(|e| format!("cannot write config.json: {e}"))
+}
+
+fn config_file() -> PathBuf {
+    config_dir().join("config.json")
 }
 
 // ---------------------------------------------------------------- vaults
@@ -727,18 +731,69 @@ fn close_vault(id: String) -> Result<(), Failure> {
 
 /// Take a vault off the board for good. Its path goes into `hide`, in the
 /// running config and in config.json: the path rather than the name, so a
-/// namesake keeps its tile. Obsidian's registry is left alone, and deleting
-/// the entry from config.json brings the tile back.
+/// namesake keeps its tile. Obsidian's registry is left alone, and Hidden
+/// vaults in the tray menu brings the tile back.
 #[tauri::command]
-fn hide_vault(cfg: State<SharedConfig>, id: String) -> Result<(), String> {
+fn hide_vault(app: AppHandle, cfg: State<SharedConfig>, id: String) -> Result<(), String> {
     let all = registered_vaults();
     let v = all.iter().find(|v| v.id == id).ok_or("no such vault")?;
-    let mut cfg = cfg.0.lock().unwrap();
-    if !cfg.hidden(v) {
-        persist_hidden(&v.path)?;
+    {
+        let mut cfg = cfg.0.lock().unwrap();
+        if cfg.hidden(v) {
+            return Ok(());
+        }
+        edit_hide(&config_file(), |h| h.push(v.path.clone().into()))?;
         cfg.hide.push(v.path.clone());
     }
+    refresh_tray(&app);
     Ok(())
+}
+
+/// Put a `hide` entry's vaults back on the board, from the tray. The board
+/// re-reads its tiles when summoned, so nothing else needs telling.
+fn unhide(app: &AppHandle, entry: &str) {
+    {
+        let mut cfg = app.state::<SharedConfig>().inner().0.lock().unwrap();
+        match edit_hide(&config_file(), |h| h.retain(|e| e.as_str() != Some(entry))) {
+            Ok(()) => cfg.hide.retain(|e| e != entry),
+            Err(e) => eprintln!("hvelf: {e}"),
+        }
+    }
+    refresh_tray(app);
+}
+
+/// The Hidden vaults menu, as (entry, label) pairs sorted by label: one per
+/// `hide` entry, named the way its tile was. The parent folder is added
+/// where the name alone would not say which vault, and an entry Obsidian no
+/// longer knows says so, since putting it back will show nothing.
+fn hidden_menu(hide: &[String], all: &[Vault]) -> Vec<(String, String)> {
+    let mut seen = HashSet::new();
+    let entries: Vec<&String> = hide.iter().filter(|e| seen.insert(e.as_str())).collect();
+    let name_of = |e: &str| {
+        all.iter()
+            .find(|v| entry_matches(e, v))
+            .map_or_else(|| basename(e), |v| v.name.clone())
+    };
+    let mut items: Vec<(String, String)> = entries
+        .iter()
+        .map(|e| {
+            let name = name_of(e);
+            let known = all.iter().any(|v| entry_matches(e, v));
+            let namesake = all.iter().any(|v| same_name(&v.name, &name) && !entry_matches(e, v))
+                || entries.iter().any(|o| o != e && same_name(&name_of(o), &name));
+            let mut notes = Vec::new();
+            if namesake {
+                notes.extend(parent(e));
+            }
+            if !known {
+                notes.push("not in Obsidian".to_string());
+            }
+            let label = if notes.is_empty() { name } else { format!("{name} ({})", notes.join(", ")) };
+            (e.to_string(), label)
+        })
+        .collect();
+    items.sort_by_key(|(_, label)| label.to_lowercase());
+    items
 }
 
 fn do_launch(app: &AppHandle, cfg: &Config, id: &str) -> Result<(), Failure> {
@@ -1117,23 +1172,59 @@ fn toggle_window(app: &AppHandle) {
 
 // ---------------------------------------------------------------- main
 
-fn build_tray(app: &tauri::App) -> tauri::Result<()> {
-    use tauri::menu::{Menu, MenuItem};
-    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+/// Menu ids of the Hidden vaults items: this prefix, then the `hide` entry.
+const UNHIDE: &str = "unhide:";
 
+fn tray_menu<M: Manager<tauri::Wry>>(app: &M) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let cfg = app.state::<SharedConfig>().get();
+    let entries = hidden_menu(&cfg.hide, &registered_vaults());
+    let mut items: Vec<Box<dyn IsMenuItem<tauri::Wry>>> = Vec::new();
+    if entries.is_empty() {
+        items.push(Box::new(MenuItem::new(app, "Nothing is hidden", false, None::<&str>)?));
+    } else {
+        items.push(Box::new(MenuItem::new(app, "Click one to put it back", false, None::<&str>)?));
+        items.push(Box::new(PredefinedMenuItem::separator(app)?));
+        for (entry, label) in entries {
+            items.push(Box::new(MenuItem::with_id(app, format!("{UNHIDE}{entry}"), label, true, None::<&str>)?));
+        }
+    }
+    let refs: Vec<&dyn IsMenuItem<tauri::Wry>> = items.iter().map(|i| i.as_ref()).collect();
+    let hidden = Submenu::with_items(app, "Hidden vaults", true, &refs)?;
     let show = MenuItem::with_id(app, "show", "Show board", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit hvelf", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    Menu::with_items(app, &[&show, &hidden, &quit])
+}
+
+/// Rebuild the tray menu after `hide` changes. No tray, nothing to do.
+fn refresh_tray(app: &AppHandle) {
+    if let Some(tray) = app.tray_by_id("hvelf") {
+        match tray_menu(app) {
+            Ok(menu) => {
+                let _ = tray.set_menu(Some(menu));
+            }
+            Err(e) => eprintln!("hvelf: tray menu: {e}"),
+        }
+    }
+}
+
+fn build_tray(app: &tauri::App) -> tauri::Result<()> {
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     TrayIconBuilder::with_id("hvelf")
         .icon(app.default_window_icon().expect("no window icon").clone())
         .tooltip("hvelf")
-        .menu(&menu)
+        .menu(&tray_menu(app)?)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, e| match e.id.as_ref() {
             "show" => toggle_window(app),
             "quit" => app.exit(0),
-            _ => {}
+            id => {
+                if let Some(entry) = id.strip_prefix(UNHIDE) {
+                    unhide(app, entry);
+                }
+            }
         })
         .on_tray_icon_event(|tray, event| {
             if let TrayIconEvent::Click {
@@ -1414,10 +1505,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.json");
         std::fs::write(&path, r#"{"zeta":1,"hotkey":"alt+grave","hide":[]}"#).unwrap();
-        let raw = std::fs::read_to_string(&path).unwrap();
-        let mut doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
-        doc["hide"].as_array_mut().unwrap().push("/home/p q/archive/notes".into());
-        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+        edit_hide(&path, |h| h.push("/home/p q/archive/notes".into())).unwrap();
         let back: Config = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let v = vault("0918273645abcdef", "/home/p q/archive/notes", false);
         let twin = vault("a1b2c3d4e5f60718", "/home/p q/Lab/notes", false);
@@ -1427,5 +1515,39 @@ mod tests {
             .unwrap().as_object().unwrap().keys().cloned().collect();
         assert_eq!(keys, ["zeta", "hotkey", "hide"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn putting_back_removes_only_that_entry_and_keeps_unknown_keys() {
+        let dir = std::env::temp_dir().join(format!("hvelf-unhide-{} é 'q'", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"zeta":1,"hide":["/v/a","/v/b","/v/a"],"hotkey":"alt+grave"}"#).unwrap();
+        edit_hide(&path, |h| h.retain(|e| e.as_str() != Some("/v/a"))).unwrap();
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(doc["hide"], serde_json::json!(["/v/b"]));
+        let keys: Vec<String> = doc.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(keys, ["zeta", "hide", "hotkey"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn hidden_menu_names_entries_the_way_their_tiles_were() {
+        let all = vec![
+            vault("1", "/v/research/admin", true),
+            vault("2", "/v/research/notes", false),
+            vault("3", "/v/archive/notes", false),
+        ];
+        let hide: Vec<String> = ["/v/research/admin", "/v/archive/notes", "/gone/Index", "/v/research/admin"]
+            .map(String::from)
+            .into();
+        let m = hidden_menu(&hide, &all);
+        let labels: Vec<&str> = m.iter().map(|(_, l)| l.as_str()).collect();
+        assert_eq!(labels, ["admin", "Index (not in Obsidian)", "notes (archive)"]);
+        assert_eq!(m[2].0, "/v/archive/notes");
+        // A bare name hides every vault of that name, and is listed as one.
+        let m = hidden_menu(&["notes".to_string()], &all);
+        assert_eq!(m, [("notes".to_string(), "notes".to_string())]);
     }
 }

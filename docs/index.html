@@ -124,7 +124,7 @@
   <ul>
     <li><strong>Summoned on a hotkey.</strong> <kbd>Alt</kbd>+<kbd>`</kbd> by default
       toggles the board; <kbd>Esc</kbd> or focus loss dismisses it. A tray icon gives
-      a mouse path and a quit; there is no taskbar clutter.</li>
+      a mouse path, the hidden vaults and a quit; there is no taskbar clutter.</li>
     <li><strong>Quick launch.</strong> An optional second hotkey opens your most
       recent vault directly, skipping the board entirely.</li>
     <li><strong>Focus or launch.</strong> A tile raises the vault's window if it is
@@ -138,8 +138,9 @@
     <li><strong>Remove from the board.</strong> On a vault that is not open, the same
       <code>×</code> takes its tile off the board, for vaults that have gone stale. The
       first click asks and the second removes. The vault's path goes into
-      <code>hide</code> in the config and Obsidian is left alone; deleting the entry
-      brings the tile back.</li>
+      <code>hide</code> in the config and Obsidian is left alone. <strong>Hidden
+      vaults</strong>, in the tray menu, lists every vault taken off the board; click
+      one and its tile comes back.</li>
     <li><strong>Recency order.</strong> Tiles sort most-recently-used first. While
       hvelf runs it tracks which vault window you actually have focused, which beats
       Obsidian's own timestamps: those only update when a vault is opened, not while
