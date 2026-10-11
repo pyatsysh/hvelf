@@ -176,7 +176,6 @@ fn executable(p: &Path) -> bool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn scratch(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("hvelf-keepcmd-{tag}-{} é", std::process::id()));
@@ -185,11 +184,20 @@ mod tests {
         d
     }
 
-    /// A stand-in `keep`: a shell script in `dir`.
+    /// A stand-in `keep`: a shell script in `dir`. A child process writes it, never this one: the tests run on
+    /// threads that fork, a fork made while this process held the script open for writing would keep that
+    /// descriptor until it execs, and running the script then fails with ETXTBSY ("Text file busy").
     fn stand_in(dir: &Path, body: &str) -> Vec<String> {
+        use std::io::Write;
         let p = dir.join("keep stand-in");
-        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut w = std::process::Command::new("sh")
+            .args(["-c", "cat > \"$1\" && chmod 0755 \"$1\"", "sh"])
+            .arg(&p)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        w.stdin.take().unwrap().write_all(format!("#!/bin/sh\n{body}\n").as_bytes()).unwrap();
+        assert!(w.wait().unwrap().success(), "the stand-in could not be written");
         vec![p.display().to_string()]
     }
 
