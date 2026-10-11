@@ -36,14 +36,20 @@ if (window.__TAURI__.event) {
 // Platform limits (Linux: Wayland, no window manager, missing handler) are
 // listed under the board so a disabled action says why. They are read again
 // each time the board is summoned, since the chord grab is recorded after the
-// page has loaded. A missing GlobalShortcuts portal is a limit only when no
-// other chord route works.
+// page has loaded. While some chord summons the board, through hvelf's own
+// grab or a GNOME shortcut, the routes not in use are no limit: no
+// GlobalShortcuts portal, no chord of hvelf's own, no GNOME shortcut. A chord
+// that failed, or a GNOME shortcut that cannot run, always is.
 function showLimits() {
   invoke("capabilities").then((caps) => {
-    const chords = caps.some((c) => c.state === "available"
-      && (c.capability === "global-hotkey-x11" || c.capability === "global-hotkey-desktop"));
+    const works = (name) => caps.some((c) => c.capability === name
+      && (c.state === "available" || c.state === "degraded"));
+    const chords = works("global-hotkey-x11") || works("global-hotkey-desktop");
+    const unused = (c) => c.capability === "global-hotkey-portal"
+      || (c.state === "disabled"
+        && (c.capability === "global-hotkey-x11" || c.capability === "global-hotkey-desktop"));
     const limits = caps.filter((c) => c.state !== "available" && c.capability !== "session"
-      && !(c.capability === "global-hotkey-portal" && chords));
+      && !(chords && unused(c)));
     hintEl.querySelector(".limits")?.remove();
     if (limits.length === 0) return;
     const span = document.createElement("span");

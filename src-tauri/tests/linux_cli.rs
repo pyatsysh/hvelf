@@ -15,11 +15,21 @@ fn root(tag: &str) -> PathBuf {
     d
 }
 
+/// A stand-in program: a shell script in `dir`. A child process writes it, never this one: the tests run on threads
+/// that fork, a fork made while this process held the script open for writing would keep that descriptor until it
+/// execs, and running the script then fails with ETXTBSY ("Text file busy"), as the keep tests found.
 fn fake_bin(dir: &Path, name: &str, body: &str) {
+    use std::io::Write;
     std::fs::create_dir_all(dir).unwrap();
     let p = dir.join(name);
-    std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut w = Command::new("sh")
+        .args(["-c", "cat > \"$1\" && chmod 0755 \"$1\"", "sh"])
+        .arg(&p)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    w.stdin.take().unwrap().write_all(format!("#!/bin/sh\n{body}\n").as_bytes()).unwrap();
+    assert!(w.wait().unwrap().success(), "the stand-in {name} could not be written");
 }
 
 /// hvelf with a clean environment: only what the test names.
@@ -187,18 +197,20 @@ fn capability_matrix_is_honest_headless_and_on_wayland() {
     assert_eq!(c["global-hotkey-portal"].0, "unavailable");
 }
 
-/// GNOME as `gsettings` shows it with the coordinator's custom shortcuts for hvelf and GNOME's own switch-group
-/// binding; any other question is an error, so the test sees every call it did not expect.
+/// GNOME as `gsettings` shows it with custom shortcuts for hvelf and GNOME's own switch-group binding; any other
+/// question is an error, so the test sees every call it did not expect. FAKE_LIST, FAKE_TOGGLE and FAKE_SWITCH
+/// change the list of custom shortcuts, the toggle's key and switch-group's keys; by default they are the
+/// coordinator's shortcuts of 11 October 14:01Z on a stock GNOME.
 const FAKE_GSETTINGS: &str = r#"P=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
 case "$1 $2 $3" in
-  "get org.gnome.settings-daemon.plugins.media-keys custom-keybindings") echo "['$P/hvelf-toggle/', '$P/hvelf-keep/']" ;;
+  "get org.gnome.settings-daemon.plugins.media-keys custom-keybindings") echo "${FAKE_LIST:-['$P/hvelf-toggle/', '$P/hvelf-keep/']}" ;;
   *hvelf-toggle/\ command) echo "'hvelf --toggle'" ;;
-  *hvelf-toggle/\ binding) echo "'<Control><Alt>grave'" ;;
+  *hvelf-toggle/\ binding) echo "'${FAKE_TOGGLE:-<Control><Alt>grave}'" ;;
   *hvelf-toggle/\ name) echo "'hvelf: show or hide the board'" ;;
   *hvelf-keep/\ command) echo "'hvelf --keep'" ;;
   *hvelf-keep/\ binding) echo "'<Alt>k'" ;;
   *hvelf-keep/\ name) echo "'hvelf: keep the highlighted text'" ;;
-  "list-recursively org.gnome.desktop.wm.keybindings ") echo "org.gnome.desktop.wm.keybindings switch-group ['<Super>Above_Tab', '<Alt>Above_Tab']" ;;
+  "list-recursively org.gnome.desktop.wm.keybindings ") echo "org.gnome.desktop.wm.keybindings switch-group ${FAKE_SWITCH:-['<Super>Above_Tab', '<Alt>Above_Tab']}" ;;
   list-recursively*) ;;
   *) echo "unexpected gsettings call: $*" >&2; exit 1 ;;
 esac"#;
@@ -225,6 +237,27 @@ fn chords_report_the_desktop_binding_and_the_boards_own_grab_state() {
     assert!(c["global-hotkey-desktop"].1.contains("Alt+K runs `hvelf --keep`"), "{}", c["global-hotkey-desktop"].1);
     assert_eq!(c["global-hotkey-x11"].0, "unknown");
     assert!(c["global-hotkey-x11"].1.contains("no board has published"), "{}", c["global-hotkey-x11"].1);
+
+    // The owner's chord of 16:46Z, Alt+`, with switch-group moved to Super+`: GNOME runs it for hvelf.
+    let owner = [("XDG_CURRENT_DESKTOP", "ubuntu:GNOME"), ("FAKE_TOGGLE", "<Alt>grave"), ("FAKE_SWITCH", "['<Super>Above_Tab']")];
+    let c = caps(&hvelf(&["--capabilities"], &env, &owner));
+    assert_eq!(c["global-hotkey-desktop"].0, "available", "{}", c["global-hotkey-desktop"].1);
+    assert!(c["global-hotkey-desktop"].1.contains("Alt+` runs `hvelf --toggle`, Alt+K runs `hvelf --keep`"), "{}", c["global-hotkey-desktop"].1);
+
+    // The same shortcut while switch-group still holds Alt+`: mutter keeps the chord, so the shortcut never runs,
+    // and the record says so instead of claiming it.
+    let stock = [("XDG_CURRENT_DESKTOP", "ubuntu:GNOME"), ("FAKE_TOGGLE", "<Alt>grave")];
+    let c = caps(&hvelf(&["--capabilities"], &env, &stock));
+    assert_eq!(c["global-hotkey-desktop"].0, "degraded", "{}", c["global-hotkey-desktop"].1);
+    assert!(
+        c["global-hotkey-desktop"].1.contains("Alt+` for `hvelf --toggle` never runs, since GNOME's own shortcut switch-group (org.gnome.desktop.wm.keybindings) takes that chord first"),
+        "{}",
+        c["global-hotkey-desktop"].1
+    );
+
+    // No custom shortcut runs hvelf: the route is not set up.
+    let c = caps(&hvelf(&["--capabilities"], &env, &[("XDG_CURRENT_DESKTOP", "ubuntu:GNOME"), ("FAKE_LIST", "@as []")]));
+    assert_eq!(c["global-hotkey-desktop"].0, "disabled", "{}", c["global-hotkey-desktop"].1);
 
     // Outside GNOME there is no desktop binding to report.
     let c = caps(&hvelf(&["--capabilities"], &env, &[("XDG_CURRENT_DESKTOP", "KDE")]));

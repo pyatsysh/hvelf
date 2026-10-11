@@ -952,22 +952,45 @@ pub fn capabilities() -> Vec<Capability> {
         Err(why) => cap("global-hotkey-portal", "unavailable", format!("GlobalShortcuts portal not reachable: {why}"), "org.freedesktop.portal.GlobalShortcuts"),
     });
     if let Ok(d) = crate::gnome::read() {
-        let mine = d.hvelf_shortcuts();
-        if !mine.is_empty() {
-            let list = mine.iter().map(|(c, cmd)| format!("{c} runs `{cmd}`")).collect::<Vec<_>>().join(", ");
-            out.push(cap(
-                "global-hotkey-desktop",
-                "available",
-                format!("{list}, as GNOME custom shortcuts; GNOME handles those chords, so hvelf does not grab them itself"),
-                "org.gnome.settings-daemon.plugins.media-keys",
-            ));
-        }
+        out.push(desktop_capability(&d.hvelf_shortcuts()));
     }
     out.push(match session_bus_reachable() {
         Ok(()) => cap("toggle-command", "available", "`hvelf --toggle` (also --show, --hide, --quick-launch, --quit) reaches the running board over D-Bus; bind it as a desktop shortcut", "tauri-plugin-single-instance"),
         Err(why) => cap("toggle-command", "unavailable", format!("a second hvelf cannot reach the running one: {why}"), "DBUS_SESSION_BUS_ADDRESS"),
     });
     out
+}
+
+/// The `global-hotkey-desktop` record, from GNOME's custom shortcuts that run hvelf (DELIVERY-11): which chords GNOME
+/// runs for hvelf, and which of them never run because GNOME gives their chord to something else first.
+pub fn desktop_capability(mine: &[crate::gnome::DesktopChord]) -> Capability {
+    const SOURCE: &str = "org.gnome.settings-daemon.plugins.media-keys";
+    if mine.is_empty() {
+        return cap(
+            "global-hotkey-desktop",
+            "disabled",
+            "no GNOME custom shortcut runs hvelf; the hvelf config step adds them, and Settings, Keyboard, Custom Shortcuts shows them",
+            SOURCE,
+        );
+    }
+    let working: Vec<String> = mine.iter().filter(|d| d.clash.is_none()).map(|d| format!("{} runs `{}`", d.chord, d.command)).collect();
+    let clashing: Vec<String> = mine
+        .iter()
+        .filter_map(|d| d.clash.as_ref().map(|c| format!("{} for `{}` never runs, since {c} takes that chord first", d.chord, d.command)))
+        .collect();
+    let state = if clashing.is_empty() {
+        "available"
+    } else if working.is_empty() {
+        "unavailable"
+    } else {
+        "degraded"
+    };
+    let mut parts = Vec::new();
+    if !working.is_empty() {
+        parts.push(format!("{} as GNOME custom shortcuts; GNOME handles those chords, so hvelf does not grab them itself", working.join(", ")));
+    }
+    parts.extend(clashing);
+    cap("global-hotkey-desktop", state, parts.join("; "), SOURCE)
 }
 
 // ------------------------------------------------------------------ tests
@@ -1111,6 +1134,29 @@ mod tests {
         assert_eq!(parse_chord("alt+f1", map), Some(Chord { mods: 1 << 3, keycode: 67 }));
         assert_eq!(parse_chord("alt+nosuchkey", map), None);
         assert_eq!(parse_chord("alt", map), None);
+    }
+
+    #[test]
+    fn the_desktop_record_says_which_gnome_shortcuts_can_run() {
+        use crate::gnome::DesktopChord;
+        let chord = |c: &str, cmd: &str, clash: Option<&str>| DesktopChord { chord: c.into(), command: cmd.into(), clash: clash.map(String::from) };
+        let none = desktop_capability(&[]);
+        assert_eq!((none.capability, none.state), ("global-hotkey-desktop", "disabled"), "none set up");
+        assert!(none.reason.contains("no GNOME custom shortcut runs hvelf"), "{}", none.reason);
+
+        let ok = desktop_capability(&[chord("Alt+`", "hvelf --toggle", None), chord("Alt+K", "hvelf --keep", None)]);
+        assert_eq!(ok.state, "available");
+        assert!(ok.reason.starts_with("Alt+` runs `hvelf --toggle`, Alt+K runs `hvelf --keep` as GNOME custom shortcuts"), "{}", ok.reason);
+
+        let switch = "GNOME's own shortcut switch-group (org.gnome.desktop.wm.keybindings)";
+        let part = desktop_capability(&[chord("Alt+`", "hvelf --toggle", Some(switch)), chord("Alt+K", "hvelf --keep", None)]);
+        assert_eq!(part.state, "degraded");
+        assert!(part.reason.contains("Alt+` for `hvelf --toggle` never runs, since GNOME's own shortcut switch-group"), "{}", part.reason);
+        assert!(part.reason.contains("Alt+K runs `hvelf --keep`"), "{}", part.reason);
+
+        let all = desktop_capability(&[chord("Alt+`", "hvelf --toggle", Some(switch))]);
+        assert_eq!(all.state, "unavailable");
+        assert!(!all.reason.contains("GNOME handles those chords"), "{}", all.reason);
     }
 
     #[test]

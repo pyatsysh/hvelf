@@ -8,6 +8,11 @@
 //! leaves to GNOME every chord GNOME already binds, and says so in its
 //! capability records.
 //!
+//! Within GNOME, its own bindings come first: mutter refuses a custom shortcut
+//! on a key one of them holds, and gsd-media-keys grabs its own keys before the
+//! custom ones, which it grabs in their list's order. A custom shortcut whose
+//! chord is taken first that way never runs, and is reported as such.
+//!
 //! The bindings are read with `gsettings`, which reads the dconf database
 //! directly; nothing here writes a setting.
 
@@ -37,10 +42,22 @@ pub struct Shortcut {
 /// Who holds a chord on the desktop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Owner {
-    /// A custom shortcut that runs hvelf: GNOME handles the chord for hvelf.
-    Hvelf { command: String },
-    /// A custom shortcut for another command, or one of GNOME's own bindings.
+    /// A custom shortcut that runs hvelf: GNOME handles the chord and runs `command`, whose hvelf action is
+    /// `action` (`--toggle`, `--keep`, `--quick-launch`, or empty for a bare `hvelf`).
+    Hvelf { command: String, action: String },
+    /// One of GNOME's own bindings, or a custom shortcut for another command.
     Other { what: String },
+}
+
+/// A GNOME custom shortcut that runs hvelf, and whether GNOME can run it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DesktopChord {
+    /// The chord as a person writes it, e.g. Alt+`.
+    pub chord: String,
+    pub command: String,
+    /// What takes the chord first, if anything: one of GNOME's own bindings, or an earlier custom shortcut on the
+    /// same chord. GNOME then never runs this one.
+    pub clash: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -104,33 +121,42 @@ fn read_now() -> Result<Bindings, String> {
 }
 
 impl Bindings {
-    /// Who on the desktop holds `chord` (hvelf's spelling, e.g. `ctrl+alt+grave`), if anyone.
+    /// What GNOME does with `chord` (hvelf's spelling, e.g. `alt+grave`), if anything: GNOME's own bindings first,
+    /// then the custom shortcuts in their list's order, as GNOME itself settles it.
     pub fn owner_of(&self, chord: &str) -> Option<Owner> {
         let want = normalize_chord(chord)?;
-        for s in &self.custom {
-            if accel_to_chord(&s.binding).as_deref() == Some(want.as_str()) {
-                return Some(if hvelf_action(&s.command).is_some() {
-                    Owner::Hvelf { command: s.command.trim().to_string() }
-                } else {
-                    Owner::Other { what: format!("the GNOME custom shortcut '{}'", s.name) }
-                });
-            }
+        if let Some(what) = self.builtin_holder(&want) {
+            return Some(Owner::Other { what });
         }
-        for (schema, key, accels) in &self.builtin {
-            if accels.iter().any(|a| accel_to_chord(a).as_deref() == Some(want.as_str())) {
-                return Some(Owner::Other { what: format!("GNOME's own shortcut {key} ({schema})") });
-            }
-        }
-        None
+        let s = self.custom.iter().find(|s| accel_to_chord(&s.binding).as_deref() == Some(want.as_str()))?;
+        Some(match hvelf_action(&s.command) {
+            Some(action) => Owner::Hvelf { command: s.command.trim().to_string(), action: action.to_string() },
+            None => Owner::Other { what: format!("the GNOME custom shortcut '{}', which runs `{}`", s.name, s.command.trim()) },
+        })
     }
 
-    /// The bound custom shortcuts that run hvelf, as (the chord as a person writes it, the command).
-    pub fn hvelf_shortcuts(&self) -> Vec<(String, String)> {
-        self.custom
+    /// The first of GNOME's own bindings on a canonical chord, described.
+    fn builtin_holder(&self, want: &str) -> Option<String> {
+        self.builtin
             .iter()
-            .filter(|s| hvelf_action(&s.command).is_some())
-            .filter_map(|s| Some((pretty(&accel_to_chord(&s.binding)?), s.command.trim().to_string())))
-            .collect()
+            .find(|(_, _, accels)| accels.iter().any(|a| accel_to_chord(a).as_deref() == Some(want)))
+            .map(|(schema, key, _)| format!("GNOME's own shortcut {key} ({schema})"))
+    }
+
+    /// The bound custom shortcuts that run hvelf, in their list's order, each with what takes its chord first.
+    pub fn hvelf_shortcuts(&self) -> Vec<DesktopChord> {
+        let mut out = Vec::new();
+        for (i, s) in self.custom.iter().enumerate() {
+            let (Some(_), Some(chord)) = (hvelf_action(&s.command), accel_to_chord(&s.binding)) else { continue };
+            let clash = self.builtin_holder(&chord).or_else(|| {
+                self.custom[..i]
+                    .iter()
+                    .find(|e| accel_to_chord(&e.binding).as_deref() == Some(chord.as_str()))
+                    .map(|e| format!("the earlier GNOME custom shortcut '{}', which runs `{}`", e.name, e.command.trim()))
+            });
+            out.push(DesktopChord { chord: pretty(&chord), command: s.command.trim().to_string(), clash });
+        }
+        out
     }
 }
 
@@ -356,12 +382,62 @@ mod tests {
             ],
             builtin: vec![("org.gnome.desktop.wm.keybindings".into(), "switch-group".into(), vec!["<Super>Above_Tab".into(), "<Alt>Above_Tab".into()])],
         };
-        assert_eq!(b.owner_of("ctrl+alt+grave"), Some(Owner::Hvelf { command: "hvelf --toggle".into() }));
-        assert_eq!(b.owner_of("ctrl+alt+t"), Some(Owner::Other { what: "the GNOME custom shortcut 'Terminal'".into() }));
+        assert_eq!(b.owner_of("ctrl+alt+grave"), Some(Owner::Hvelf { command: "hvelf --toggle".into(), action: "--toggle".into() }));
+        assert_eq!(b.owner_of("ctrl+alt+t"), Some(Owner::Other { what: "the GNOME custom shortcut 'Terminal', which runs `gnome-terminal`".into() }));
         assert_eq!(b.owner_of("alt+grave"), Some(Owner::Other { what: "GNOME's own shortcut switch-group (org.gnome.desktop.wm.keybindings)".into() }));
         assert_eq!(b.owner_of("alt+k"), None, "an unbound custom shortcut holds no chord");
         assert_eq!(b.owner_of("ctrl+alt+1"), None);
-        assert_eq!(b.hvelf_shortcuts(), vec![("Ctrl+Alt+`".to_string(), "hvelf --toggle".to_string())], "an unbound one is left out");
+        assert_eq!(
+            b.hvelf_shortcuts(),
+            vec![DesktopChord { chord: "Ctrl+Alt+`".into(), command: "hvelf --toggle".into(), clash: None }],
+            "an unbound one is left out"
+        );
+    }
+
+    /// The owner's chords of 11 October: Alt+` for the board once GNOME's switch-group has moved to Super+`, and
+    /// what GNOME does when a custom shortcut lands on a chord already taken.
+    #[test]
+    fn gnome_settles_a_chord_before_its_custom_shortcuts() {
+        let custom = |path: &str, name: &str, command: &str, binding: &str| Shortcut {
+            path: path.into(),
+            name: name.into(),
+            command: command.into(),
+            binding: binding.into(),
+        };
+        let moved = vec![("org.gnome.desktop.wm.keybindings".to_string(), "switch-group".to_string(), vec!["<Super>Above_Tab".to_string()])];
+        let stock = vec![("org.gnome.desktop.wm.keybindings".to_string(), "switch-group".to_string(), vec!["<Super>Above_Tab".to_string(), "<Alt>Above_Tab".to_string()])];
+        let owners = vec![
+            custom("/p/hvelf-toggle/", "hvelf: show or hide the board", "hvelf --toggle", "<Alt>grave"),
+            custom("/p/hvelf-keep/", "hvelf: keep", "hvelf --keep", "<Alt>k"),
+            custom("/p/hvelf-quick-launch/", "hvelf: quick launch", "/usr/bin/hvelf --quick-launch", "<Control><Alt>1"),
+        ];
+
+        // Switch-group moved: the three are GNOME's to run, and none is taken first.
+        let b = Bindings { custom: owners.clone(), builtin: moved.clone() };
+        assert_eq!(b.owner_of("alt+grave"), Some(Owner::Hvelf { command: "hvelf --toggle".into(), action: "--toggle".into() }));
+        assert_eq!(b.owner_of("ctrl+alt+1"), Some(Owner::Hvelf { command: "/usr/bin/hvelf --quick-launch".into(), action: "--quick-launch".into() }));
+        assert!(b.hvelf_shortcuts().iter().all(|d| d.clash.is_none()));
+        assert_eq!(b.hvelf_shortcuts().iter().map(|d| d.chord.as_str()).collect::<Vec<_>>(), ["Alt+`", "Alt+K", "Ctrl+Alt+1"]);
+
+        // Switch-group still on Alt+`: mutter keeps it, so the toggle shortcut never runs, and hvelf must not
+        // take the chord either.
+        let b = Bindings { custom: owners.clone(), builtin: stock };
+        let what = "GNOME's own shortcut switch-group (org.gnome.desktop.wm.keybindings)".to_string();
+        assert_eq!(b.owner_of("alt+grave"), Some(Owner::Other { what: what.clone() }));
+        assert_eq!(b.hvelf_shortcuts()[0].clash, Some(what));
+        assert_eq!(b.hvelf_shortcuts()[1].clash, None);
+
+        // A custom shortcut earlier in the list on the same chord is grabbed first; one for another hvelf action
+        // is still hvelf's, with its own action, for the caller to compare.
+        let mut first = vec![custom("/p/custom0/", "Notes", "gedit", "<Alt>k")];
+        first.extend(owners.clone());
+        first.push(custom("/p/custom9/", "keep twice", "hvelf --keep", "<Alt>grave"));
+        let b = Bindings { custom: first, builtin: moved };
+        assert_eq!(b.owner_of("alt+k"), Some(Owner::Other { what: "the GNOME custom shortcut 'Notes', which runs `gedit`".into() }));
+        let d = b.hvelf_shortcuts();
+        assert_eq!(d[1].clash.as_deref(), Some("the earlier GNOME custom shortcut 'Notes', which runs `gedit`"));
+        assert_eq!(d[3].clash.as_deref(), Some("the earlier GNOME custom shortcut 'hvelf: show or hide the board', which runs `hvelf --toggle`"));
+        assert_eq!(b.owner_of("alt+grave"), Some(Owner::Hvelf { command: "hvelf --toggle".into(), action: "--toggle".into() }));
     }
 
     #[test]

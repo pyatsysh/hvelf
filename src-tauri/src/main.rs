@@ -1270,7 +1270,9 @@ fn launch_or_tell(app: &AppHandle, cfg: &Config, id: &str) {
     }
 }
 
-#[tauri::command]
+/// Runs off the main thread: the board's footer asks each time it is summoned, and the probes can wait seconds
+/// on D-Bus (the session bus, the GlobalShortcuts portal) or on `gsettings`.
+#[tauri::command(async)]
 #[allow(unused_variables)]
 fn capabilities(runtime: State<RuntimeCaps>, cfg: State<SharedConfig>, maps: State<MapCache>) -> Vec<Capability> {
     #[allow(unused_mut)]
@@ -2124,7 +2126,18 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
                 return;
             }
         };
-        let desktop = gnome::read().ok();
+        let mut remarks = Vec::new();
+        let desktop = match gnome::read() {
+            Ok(d) => Some(d),
+            Err(e) => {
+                // Outside GNOME there is nothing to read; in it, say that chords GNOME may bind are grabbed anyway.
+                if gnome::is_gnome_from(std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref()) {
+                    eprintln!("hvelf: GNOME's key bindings could not be read ({e}), so hvelf grabs its chords without leaving any to GNOME");
+                    remarks.push(format!("GNOME's key bindings could not be read ({e}), so none was left to GNOME"));
+                }
+                None
+            }
+        };
         let mut chords = Vec::new();
         let mut names = Vec::new();
         let mut left = Vec::new();
@@ -2134,10 +2147,21 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
                 continue;
             }
             let name = gnome::normalize_chord(&spec).map(|c| gnome::pretty(&c)).unwrap_or_else(|| spec.clone());
+            // The command a desktop shortcut runs to do what this chord does in hvelf.
+            let own = match slot {
+                1 => "--toggle",
+                2 => "--quick-launch",
+                _ => "--keep",
+            };
             match desktop.as_ref().and_then(|d| d.owner_of(&spec)) {
-                Some(gnome::Owner::Hvelf { command }) => {
+                Some(gnome::Owner::Hvelf { command, action }) if action == own => {
                     eprintln!("hvelf: {name} is a GNOME custom shortcut that runs `{command}`; GNOME handles it, so hvelf does not grab it");
                     left.push(format!("{name} runs `{command}` as a GNOME custom shortcut"));
+                    continue;
+                }
+                Some(gnome::Owner::Hvelf { command, .. }) => {
+                    eprintln!("hvelf: {name} is a GNOME custom shortcut that runs `{command}`, not `hvelf {own}`; hvelf leaves it to GNOME and grabs nothing for it");
+                    notes.push(format!("'{spec}' runs `{command}` as a GNOME custom shortcut, not `hvelf {own}`, so hvelf leaves it to GNOME"));
                     continue;
                 }
                 Some(gnome::Owner::Other { what }) => {
@@ -2170,16 +2194,16 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
             }
         }
         if chords.is_empty() && notes.is_empty() {
-            // Every configured chord is a GNOME custom shortcut for hvelf, which global-hotkey-desktop reports,
-            // or none is configured at all.
-            if left.is_empty() {
-                caps.record(linux::cap(
-                    "global-hotkey-x11",
-                    "disabled",
-                    "no chord is configured (hotkey, quickLaunch and keep are empty), so hvelf grabs none; `hvelf --toggle` still summons the board",
-                    "XGrabKey",
-                ));
-            }
+            // Every configured chord is a GNOME custom shortcut for the same hvelf command, which
+            // global-hotkey-desktop reports, or none is configured at all. Either way the board holds no grab,
+            // and says so, so that `hvelf --capabilities` never has to guess.
+            let mut parts = vec![if left.is_empty() {
+                "no chord is configured (hotkey, quickLaunch and keep are empty), so hvelf grabs none; `hvelf --toggle` still summons the board".to_string()
+            } else {
+                format!("{}; GNOME handles those chords, so hvelf grabs none itself", left.join(", "))
+            }];
+            parts.extend(remarks.iter().cloned());
+            caps.record(linux::cap("global-hotkey-x11", "disabled", parts.join("; "), "XGrabKey"));
         } else {
             let state = if notes.is_empty() { "available" } else if chords.is_empty() { "unavailable" } else { "degraded" };
             let mut parts = Vec::new();
@@ -2192,6 +2216,7 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
             }
             parts.extend(notes.iter().cloned());
             parts.extend(left.iter().cloned());
+            parts.extend(remarks.iter().cloned());
             caps.record(linux::cap("global-hotkey-x11", state, parts.join("; "), "XGrabKey"));
         }
 
