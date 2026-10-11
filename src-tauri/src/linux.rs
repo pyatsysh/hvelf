@@ -472,6 +472,17 @@ pub mod x11 {
             .and_then(|id| id.value.first().copied())
     }
 
+    /// Whether the X input focus is still on one of this process's windows. A focus-out sent because a grab
+    /// started (hvelf's own chord, or GNOME's binding for one, pressed while the board has the keyboard) leaves the
+    /// focus where it was; clicking another window moves it. The board hides on a lost focus only when the focus
+    /// has really gone, or a chord meant to hide it would find it hidden by the grab and show it again (DELIVERY-11).
+    pub fn focus_is_ours(own_pid: u32) -> bool {
+        let Ok((conn, _)) = x11rb::connect(None) else { return false };
+        let Some(focus) = conn.get_input_focus().ok().and_then(|c| c.reply().ok()).map(|r| r.focus) else { return false };
+        // None (0) and PointerRoot (1) are nobody's window.
+        focus > 1 && client_pid(&conn, focus) == Some(own_pid)
+    }
+
     /// The PRIMARY selection: the text last highlighted on this display, and
     /// the process holding it.
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1178,6 +1189,19 @@ mod tests {
             }
         }
         assert_eq!(got, vec![(close, win, 2), (act, win, 0)]);
+
+        // The focus: on a window of this process it is ours; on the root or nobody, not.
+        use x11rb::protocol::xproto::InputFocus;
+        wm.map_window(win).unwrap();
+        wm.set_input_focus(InputFocus::PARENT, win, x11rb::CURRENT_TIME).unwrap();
+        wm.get_input_focus().unwrap().reply().unwrap();
+        assert!(x11::focus_is_ours(std::process::id()), "focus on a window of this process");
+        assert!(!x11::focus_is_ours(std::process::id() + 1), "another process's");
+        wm.set_input_focus(InputFocus::POINTER_ROOT, u32::from(InputFocus::POINTER_ROOT), x11rb::CURRENT_TIME).unwrap();
+        wm.get_input_focus().unwrap().reply().unwrap();
+        assert!(!x11::focus_is_ours(std::process::id()), "PointerRoot is nobody's");
+        wm.unmap_window(win).unwrap();
+        wm.flush().unwrap();
 
         // Chords: hvelf's grab works, a second client's is a reported conflict,
         // and a synthetic press of the grave key reaches hvelf.

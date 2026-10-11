@@ -2569,6 +2569,13 @@ fn main() {
                 return;
             }
             if let tauri::WindowEvent::Focused(false) = event {
+                // A grab that starts while the board has the keyboard (hvelf's own chord, or GNOME's binding for
+                // one) takes its focus for a moment and leaves it where it was; the chord's toggle decides then.
+                // Only a focus that has really gone to another window hides the board (DELIVERY-11).
+                #[cfg(target_os = "linux")]
+                if linux::session() == linux::Session::X11 && linux::x11::focus_is_ours(std::process::id()) {
+                    return;
+                }
                 // A capture waiting on the board is never dropped: losing
                 // the board files it unrouted, to be decided later.
                 let keep = window.state::<KeepState>().inner().clone();
