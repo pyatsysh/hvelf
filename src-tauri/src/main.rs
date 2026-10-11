@@ -16,6 +16,8 @@ mod hotkey_macos;
 mod keep;
 mod keepcmd;
 #[cfg(target_os = "linux")]
+mod gnome;
+#[cfg(target_os = "linux")]
 mod linux;
 mod vaultmap;
 
@@ -60,7 +62,58 @@ impl RuntimeCaps {
         let mut v = self.0.lock().unwrap();
         v.retain(|o| o.capability != c.capability);
         v.push(c);
+        #[cfg(target_os = "linux")]
+        publish_board_records(&v);
     }
+}
+
+/// Where the board publishes its runtime records, so `hvelf --capabilities` run from a terminal can tell whether
+/// the board's chords are held: `$XDG_RUNTIME_DIR/hvelf/board.json`, with the board's pid. None without
+/// `XDG_RUNTIME_DIR`; the folder is the user's own tmpfs, emptied at logout.
+#[cfg(target_os = "linux")]
+fn board_record_file() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()).map(|d| PathBuf::from(d).join("hvelf").join("board.json"))
+}
+
+#[cfg(target_os = "linux")]
+fn publish_board_records(v: &[Capability]) {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path) = board_record_file() else { return };
+    let Some(dir) = path.parent() else { return };
+    if fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+    let body = serde_json::json!({"pid": std::process::id(), "capabilities": v});
+    let tmp = dir.join(format!(".board.json.{}", std::process::id()));
+    if fs::write(&tmp, serde_json::to_vec_pretty(&body).unwrap_or_default()).is_ok() {
+        let _ = fs::rename(&tmp, &path);
+    }
+}
+
+/// The running board's runtime records, or the record to print instead: no board running (it stopped since it
+/// published), none published since login, or nowhere to look.
+#[cfg(target_os = "linux")]
+fn board_records() -> Vec<serde_json::Value> {
+    let instead = |state: &'static str, why: String| {
+        let note = linux::cap("global-hotkey-x11", state, format!("{why}; the running board grabs its chords, so only it can say whether they are held"), "XGrabKey");
+        vec![serde_json::to_value(note).unwrap_or_default()]
+    };
+    let Some(path) = board_record_file() else {
+        return instead("unknown", "XDG_RUNTIME_DIR is not set, so no board record can be found".into());
+    };
+    let Ok(text) = fs::read_to_string(&path) else {
+        return instead("unknown", "no board has published its records since login (none has run, or it is older than this build)".into());
+    };
+    let record: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+    let pid = record.get("pid").and_then(|p| p.as_u64()).unwrap_or(0);
+    let alive = pid != 0
+        && pid != u64::from(std::process::id())
+        && fs::read_to_string(format!("/proc/{pid}/comm")).map(|c| c.trim() == "hvelf").unwrap_or(false);
+    if !alive {
+        return instead("unavailable", "no board is running, so hvelf holds no grab".into());
+    }
+    record.get("capabilities").and_then(|c| c.as_array()).cloned().unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- config
@@ -2046,14 +2099,17 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
 /// the active window is sampled for recency, as on Windows. X11 key grabs do
 /// not cover a Wayland desktop, so there the board is summoned by a desktop
 /// shortcut bound to `hvelf --toggle`; the capability records say which
-/// route this session has.
+/// route this session has. A chord GNOME already binds is left to GNOME:
+/// when two programs grab one chord, the X server gives each press to the
+/// later grab, so which one answered would depend on the order they started
+/// in (DELIVERY-11). Each grab's outcome and each press go to stderr.
 #[cfg(target_os = "linux")]
 fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
     let caps = app.state::<RuntimeCaps>().inner().clone();
     let session = linux::session();
     if session != linux::Session::X11 {
         let reason = match session {
-            linux::Session::Wayland => "X11 key grabs do not cover a Wayland desktop; portal binding is not implemented, so bind `hvelf --toggle` as a desktop shortcut",
+            linux::Session::Wayland => "X11 key grabs do not cover a Wayland desktop; portal binding is not implemented, so bind `hvelf --toggle` as a desktop shortcut (the hvelf config step adds GNOME's)",
             _ => "no graphical session",
         };
         caps.record(linux::cap("global-hotkey-x11", if session == linux::Session::Wayland { "unsupported" } else { "unavailable" }, reason, "XGrabKey"));
@@ -2068,28 +2124,76 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
                 return;
             }
         };
+        let desktop = gnome::read().ok();
         let mut chords = Vec::new();
+        let mut names = Vec::new();
+        let mut left = Vec::new();
         let mut notes = Vec::new();
         for (slot, spec) in [(1u8, boot.hotkey.clone()), (2u8, boot.quick_launch.clone()), (3u8, boot.keep.clone())] {
             if spec.is_empty() {
                 continue;
             }
+            let name = gnome::normalize_chord(&spec).map(|c| gnome::pretty(&c)).unwrap_or_else(|| spec.clone());
+            match desktop.as_ref().and_then(|d| d.owner_of(&spec)) {
+                Some(gnome::Owner::Hvelf { command }) => {
+                    eprintln!("hvelf: {name} is a GNOME custom shortcut that runs `{command}`; GNOME handles it, so hvelf does not grab it");
+                    left.push(format!("{name} runs `{command}` as a GNOME custom shortcut"));
+                    continue;
+                }
+                Some(gnome::Owner::Other { what }) => {
+                    eprintln!("hvelf: {name} is {what}; hvelf leaves it to GNOME and grabs nothing for it");
+                    notes.push(format!("'{spec}' is {what}, so hvelf leaves it to GNOME"));
+                    continue;
+                }
+                None => {}
+            }
             match linux::x11::parse_chord(&spec, |s| g.keycode_for(s)) {
-                None => notes.push(format!("cannot parse '{spec}'")),
+                None => {
+                    eprintln!("hvelf: cannot parse the chord '{spec}'");
+                    notes.push(format!("cannot parse '{spec}'"));
+                }
                 Some(c) => match g.grab(c) {
-                    Ok(()) => chords.push((slot, c)),
-                    Err(linux::x11::GrabFailure::Conflict) => notes.push(format!("'{spec}' is already grabbed by another application")),
-                    Err(linux::x11::GrabFailure::Other(e)) => notes.push(format!("'{spec}': {e}")),
+                    Ok(()) => {
+                        eprintln!("hvelf: {name} grabbed on the root window");
+                        chords.push((slot, c));
+                        names.push(name);
+                    }
+                    Err(linux::x11::GrabFailure::Conflict) => {
+                        eprintln!("hvelf: {name} is already grabbed by another program, so hvelf could not take it");
+                        notes.push(format!("'{spec}' is already grabbed by another program"));
+                    }
+                    Err(linux::x11::GrabFailure::Other(e)) => {
+                        eprintln!("hvelf: {name} could not be grabbed: {e}");
+                        notes.push(format!("'{spec}': {e}"));
+                    }
                 },
             }
         }
-        let state = if notes.is_empty() { "available" } else if chords.is_empty() { "unavailable" } else { "degraded" };
-        let reason = if notes.is_empty() {
-            "chords grabbed on the root window by keycode; `grave` is the physical key under Esc".to_string()
+        if chords.is_empty() && notes.is_empty() {
+            // Every configured chord is a GNOME custom shortcut for hvelf, which global-hotkey-desktop reports,
+            // or none is configured at all.
+            if left.is_empty() {
+                caps.record(linux::cap(
+                    "global-hotkey-x11",
+                    "disabled",
+                    "no chord is configured (hotkey, quickLaunch and keep are empty), so hvelf grabs none; `hvelf --toggle` still summons the board",
+                    "XGrabKey",
+                ));
+            }
         } else {
-            notes.join("; ")
-        };
-        caps.record(linux::cap("global-hotkey-x11", state, reason, "XGrabKey"));
+            let state = if notes.is_empty() { "available" } else if chords.is_empty() { "unavailable" } else { "degraded" };
+            let mut parts = Vec::new();
+            if !names.is_empty() {
+                parts.push(format!(
+                    "{} grabbed on the root window by keycode, whatever the state of {}; `grave` is the physical key under Esc",
+                    names.join(", "),
+                    g.ignored_names()
+                ));
+            }
+            parts.extend(notes.iter().cloned());
+            parts.extend(left.iter().cloned());
+            caps.record(linux::cap("global-hotkey-x11", state, parts.join("; "), "XGrabKey"));
+        }
 
         // Recency: which vault window the user is in, every 2 s, on its own
         // connection so a blocked event wait never starves it.
@@ -2107,6 +2211,7 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
         let specs: Vec<linux::x11::Chord> = chords.iter().map(|(_, c)| *c).collect();
         let keep = app.state::<KeepState>().inner().clone();
         while let Some(i) = g.next_press(&specs) {
+            eprintln!("hvelf: {} pressed", names[i]);
             match chords[i].0 {
                 1 => {
                     let app2 = app.clone();
@@ -2366,15 +2471,18 @@ fn main() {
         }
         Ok(Cli::Capabilities) => {
             #[allow(unused_mut)]
-            let mut caps: Vec<Capability> = Vec::new();
+            let mut caps: Vec<serde_json::Value> = Vec::new();
             #[cfg(target_os = "linux")]
             {
                 let cfg = read_config();
                 let map = read_map(&cfg);
-                caps.extend(linux::capabilities());
-                caps.push(map_capability(&cfg, &map));
-                caps.push(keep_capability(&cfg, map));
-                caps.push(filing_capability(&cfg));
+                let mut probes = linux::capabilities();
+                probes.push(map_capability(&cfg, &map));
+                probes.push(keep_capability(&cfg, map));
+                probes.push(filing_capability(&cfg));
+                caps.extend(probes.into_iter().map(|c| serde_json::to_value(c).unwrap_or_default()));
+                // The chords are grabbed by the running board, so their state comes from its own records.
+                caps.extend(board_records());
             }
             println!("{}", serde_json::to_string_pretty(&caps).unwrap());
             return;

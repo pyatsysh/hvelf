@@ -187,6 +187,79 @@ fn capability_matrix_is_honest_headless_and_on_wayland() {
     assert_eq!(c["global-hotkey-portal"].0, "unavailable");
 }
 
+/// GNOME as `gsettings` shows it with the coordinator's custom shortcuts for hvelf and GNOME's own switch-group
+/// binding; any other question is an error, so the test sees every call it did not expect.
+const FAKE_GSETTINGS: &str = r#"P=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
+case "$1 $2 $3" in
+  "get org.gnome.settings-daemon.plugins.media-keys custom-keybindings") echo "['$P/hvelf-toggle/', '$P/hvelf-keep/']" ;;
+  *hvelf-toggle/\ command) echo "'hvelf --toggle'" ;;
+  *hvelf-toggle/\ binding) echo "'<Control><Alt>grave'" ;;
+  *hvelf-toggle/\ name) echo "'hvelf: show or hide the board'" ;;
+  *hvelf-keep/\ command) echo "'hvelf --keep'" ;;
+  *hvelf-keep/\ binding) echo "'<Alt>k'" ;;
+  *hvelf-keep/\ name) echo "'hvelf: keep the highlighted text'" ;;
+  "list-recursively org.gnome.desktop.wm.keybindings ") echo "org.gnome.desktop.wm.keybindings switch-group ['<Super>Above_Tab', '<Alt>Above_Tab']" ;;
+  list-recursively*) ;;
+  *) echo "unexpected gsettings call: $*" >&2; exit 1 ;;
+esac"#;
+
+/// The chords' state is reported truthfully (DELIVERY-11): GNOME's custom shortcuts that run hvelf, and the
+/// running board's own grab record, or why there is none.
+#[test]
+fn chords_report_the_desktop_binding_and_the_boards_own_grab_state() {
+    let home = root("chords");
+    let bin = home.join("bin");
+    fake_bin(&bin, "gsettings", FAKE_GSETTINGS);
+    fake_bin(&bin, "xdg-mime", "echo obsidian.desktop");
+    fake_bin(&bin, "xdg-open", "exit 0");
+    let rt = home.join("runtime");
+    std::fs::create_dir_all(&rt).unwrap();
+    std::fs::set_permissions(&rt, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let env = [("HOME", home.as_path()), ("PATH", bin.as_path()), ("XDG_RUNTIME_DIR", rt.as_path())];
+    let gnome = [("XDG_CURRENT_DESKTOP", "ubuntu:GNOME")];
+
+    // GNOME's custom shortcuts for hvelf are named; no board has run, so its grab state is not known.
+    let c = caps(&hvelf(&["--capabilities"], &env, &gnome));
+    assert_eq!(c["global-hotkey-desktop"].0, "available");
+    assert!(c["global-hotkey-desktop"].1.contains("Ctrl+Alt+` runs `hvelf --toggle`"), "{}", c["global-hotkey-desktop"].1);
+    assert!(c["global-hotkey-desktop"].1.contains("Alt+K runs `hvelf --keep`"), "{}", c["global-hotkey-desktop"].1);
+    assert_eq!(c["global-hotkey-x11"].0, "unknown");
+    assert!(c["global-hotkey-x11"].1.contains("no board has published"), "{}", c["global-hotkey-x11"].1);
+
+    // Outside GNOME there is no desktop binding to report.
+    let c = caps(&hvelf(&["--capabilities"], &env, &[("XDG_CURRENT_DESKTOP", "KDE")]));
+    assert!(!c.contains_key("global-hotkey-desktop"));
+
+    // A board that published and has stopped since holds no grab.
+    std::fs::create_dir_all(rt.join("hvelf")).unwrap();
+    let record = |pid: u32| {
+        serde_json::json!({"pid": pid, "capabilities": [{"capability": "global-hotkey-x11", "state": "available",
+            "reason": "Alt+K grabbed on the root window by keycode", "source": "XGrabKey", "platform": "linux-x11"}]})
+        .to_string()
+    };
+    std::fs::write(rt.join("hvelf/board.json"), record(u32::MAX - 1)).unwrap();
+    let c = caps(&hvelf(&["--capabilities"], &env, &gnome));
+    assert_eq!(c["global-hotkey-x11"].0, "unavailable");
+    assert!(c["global-hotkey-x11"].1.contains("no board is running"), "{}", c["global-hotkey-x11"].1);
+
+    // A live board: its record is printed as it published it. A copy of `sleep` named hvelf stands in for it.
+    let stand_in = home.join("board-bin").join("hvelf");
+    std::fs::create_dir_all(stand_in.parent().unwrap()).unwrap();
+    std::fs::copy("/bin/sleep", &stand_in).unwrap();
+    let mut board = Command::new(&stand_in).arg("30").spawn().unwrap();
+    std::fs::write(rt.join("hvelf/board.json"), record(board.id())).unwrap();
+    let c = caps(&hvelf(&["--capabilities"], &env, &gnome));
+    let _ = board.kill();
+    let _ = board.wait();
+    assert_eq!(c["global-hotkey-x11"].0, "available");
+    assert!(c["global-hotkey-x11"].1.contains("Alt+K grabbed"), "{}", c["global-hotkey-x11"].1);
+
+    // Without XDG_RUNTIME_DIR there is nowhere to look.
+    let c = caps(&hvelf(&["--capabilities"], &[("HOME", home.as_path()), ("PATH", bin.as_path())], &gnome));
+    assert_eq!(c["global-hotkey-x11"].0, "unknown");
+    assert!(c["global-hotkey-x11"].1.contains("XDG_RUNTIME_DIR"), "{}", c["global-hotkey-x11"].1);
+}
+
 #[test]
 fn arguments_are_data_never_commands() {
     let home = root("args");

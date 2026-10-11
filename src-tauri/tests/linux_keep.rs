@@ -759,3 +759,102 @@ fn a_missing_keep_command_captures_nothing() {
     assert!(keeps_in(&f.vaults).is_empty(), "nothing written");
     drop(front);
 }
+
+/// A keysym's keycode in the display's keymap.
+fn keycode_for(conn: &impl Connection, keysym: u32) -> u8 {
+    let setup = conn.setup();
+    let (min, max) = (setup.min_keycode, setup.max_keycode);
+    let map = conn.get_keyboard_mapping(min, max - min + 1).unwrap().reply().unwrap();
+    let per = usize::from(map.keysyms_per_keycode).max(1);
+    let i = map.keysyms.chunks(per).position(|syms| syms.contains(&keysym)).expect("keysym in the keymap");
+    min + i as u8
+}
+
+/// A chord GNOME binds to an hvelf command is left to GNOME, and the others are grabbed; the board's stderr, the
+/// X server and `hvelf --capabilities` agree on which is which, and a grabbed chord pressed with Num Lock on reaches
+/// the board (DELIVERY-11). GNOME is a fake `gsettings` binding Ctrl+Alt+` to `hvelf --toggle`.
+#[test]
+fn chords_gnome_binds_are_left_to_it_and_the_rest_are_grabbed() {
+    if !enabled() {
+        return;
+    }
+    let _s = serial();
+    let mut f = fixture("chords", None);
+    let conf_path = f.cfg.join("hvelf/config.json");
+    let mut conf: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&conf_path).unwrap()).unwrap();
+    conf["hotkey"] = "ctrl+alt+grave".into();
+    conf["quickLaunch"] = "ctrl+alt+1".into();
+    conf["keep"] = "alt+k".into();
+    std::fs::write(&conf_path, conf.to_string()).unwrap();
+    let bin = f.home.join("gnome bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let gsettings = bin.join("gsettings");
+    std::fs::write(
+        &gsettings,
+        "#!/bin/sh\nP=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings\ncase \"$1 $2 $3\" in\n  \"get org.gnome.settings-daemon.plugins.media-keys custom-keybindings\") echo \"['$P/hvelf-toggle/']\" ;;\n  *hvelf-toggle/\\ command) echo \"'hvelf --toggle'\" ;;\n  *hvelf-toggle/\\ binding) echo \"'<Control><Alt>grave'\" ;;\n  *hvelf-toggle/\\ name) echo \"'hvelf: show or hide the board'\" ;;\n  list-recursively*) ;;\n  *) exit 1 ;;\nesac\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&gsettings, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let rt = f.home.join("runtime");
+    std::fs::create_dir_all(&rt).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&rt, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    f.env.push(("PATH".into(), format!("{}:/usr/bin:/bin", bin.display())));
+    f.env.push(("XDG_CURRENT_DESKTOP".into(), "ubuntu:GNOME".into()));
+    f.env.push(("XDG_RUNTIME_DIR".into(), rt.display().to_string()));
+
+    let board = Board::start(&f);
+    board.wait_log("Ctrl+Alt+` is a GNOME custom shortcut that runs `hvelf --toggle`; GNOME handles it, so hvelf does not grab it");
+    board.wait_log("Ctrl+Alt+1 grabbed on the root window");
+    board.wait_log("Alt+K grabbed on the root window");
+
+    // The X server agrees: another client can take Ctrl+Alt+`, but Ctrl+Alt+1 is hvelf's.
+    use x11rb::protocol::xproto::{GrabMode, ModMask};
+    use x11rb::protocol::xtest::ConnectionExt as _;
+    let (other, screen) = x11rb::connect(None).unwrap();
+    let root = other.setup().roots[screen].root;
+    let ctrl_alt = ModMask::CONTROL | ModMask::M1;
+    let (grave, one) = (keycode_for(&other, 0x60), keycode_for(&other, 0x31));
+    assert!(other.grab_key(true, root, ctrl_alt, grave, GrabMode::ASYNC, GrabMode::ASYNC).unwrap().check().is_ok(), "Ctrl+Alt+` is free");
+    other.ungrab_key(grave, root, ctrl_alt).unwrap();
+    let held = other.grab_key(true, root, ctrl_alt, one, GrabMode::ASYNC, GrabMode::ASYNC).unwrap().check();
+    assert!(
+        matches!(&held, Err(x11rb::errors::ReplyError::X11Error(e)) if e.error_kind == x11rb::protocol::ErrorKind::Access),
+        "Ctrl+Alt+1 is held by hvelf: {held:?}"
+    );
+
+    // `hvelf --capabilities` prints the board's own record, and GNOME's binding.
+    let out = run(&f, &["--capabilities"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let caps: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    let find = |name: &str| caps.iter().find(|c| c["capability"] == name).cloned().unwrap_or_default();
+    let x11 = find("global-hotkey-x11");
+    assert_eq!(x11["state"], "available", "{x11}");
+    let reason = x11["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("Ctrl+Alt+1, Alt+K grabbed on the root window"), "{reason}");
+    assert!(reason.contains("Ctrl+Alt+` runs `hvelf --toggle` as a GNOME custom shortcut"), "{reason}");
+    assert_eq!(find("global-hotkey-desktop")["state"], "available");
+
+    // Alt+K with Num Lock on reaches the board. Nothing is selected, so the keep writes nothing.
+    let (num, alt, k) = (keycode_for(&other, 0xff7f), keycode_for(&other, 0xffe9), keycode_for(&other, 0x6b));
+    let tap = |key: u8| {
+        for kind in [2u8, 3] {
+            other.xtest_fake_input(kind, key, 0, root, 0, 0, 0).unwrap();
+        }
+        other.flush().unwrap();
+    };
+    tap(num);
+    wait_for("Num Lock on", 2, || u16::from(other.query_pointer(root).unwrap().reply().unwrap().mask) & (1 << 4) != 0);
+    for (kind, key) in [(2u8, alt), (2, k), (3, k), (3, alt)] {
+        other.xtest_fake_input(kind, key, 0, root, 0, 0, 0).unwrap();
+    }
+    other.flush().unwrap();
+    board.wait_log("Alt+K pressed");
+    tap(num);
+    assert!(keeps_in(&f.vaults).is_empty(), "nothing was written");
+}

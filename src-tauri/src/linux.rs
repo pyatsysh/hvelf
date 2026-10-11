@@ -585,10 +585,39 @@ pub mod x11 {
 
     // ------------------------------------------------------------ chords
 
-    /// The lock modifiers a grab must also cover, or the chord dies while
-    /// Caps Lock or Num Lock is on.
-    const LOCKS: [u16; 4] = [0, 1 << 1, 1 << 4, (1 << 1) | (1 << 4)];
-    const IGNORED: u16 = (1 << 1) | (1 << 4);
+    const LOCK_MASK: u16 = 1 << 1;
+    const MOD2: u16 = 1 << 4;
+    const NUM_LOCK: u32 = 0xff7f;
+    const SCROLL_LOCK: u32 = 0xff14;
+
+    /// The modifier bits a chord ignores, as GNOME's own shortcuts do: Caps Lock's Lock bit, and whichever of
+    /// Mod2, Mod3 and Mod5 the keymap gives Num Lock or Scroll Lock (Num Lock is Mod2 almost everywhere). A grab
+    /// covers every combination of them, or the chord dies while one of those locks is on. Shift, Control, Mod1
+    /// and Mod4 are never ignored: chords are made of them.
+    pub fn lock_bits(modmap: &[Vec<Keycode>], keysyms_of: impl Fn(Keycode) -> Vec<u32>) -> u16 {
+        let mut bits = LOCK_MASK;
+        for i in [4usize, 5, 7] {
+            let locks = modmap.get(i).is_some_and(|codes| {
+                codes.iter().any(|&k| k != 0 && keysyms_of(k).iter().any(|&s| s == NUM_LOCK || s == SCROLL_LOCK))
+            });
+            if locks {
+                bits |= 1 << i;
+            }
+        }
+        bits
+    }
+
+    /// Every combination of the bits in `mask`, 0 first.
+    pub fn submasks(mask: u16) -> Vec<u16> {
+        let mut out = vec![0];
+        let mut s = mask;
+        while s != 0 {
+            out.push(s);
+            s = (s - 1) & mask;
+        }
+        out.sort_unstable();
+        out
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Chord {
@@ -645,13 +674,40 @@ pub mod x11 {
     pub struct Grabber {
         pub conn: RustConnection,
         pub root: Window,
+        /// The lock modifiers this server's keymap defines (see `lock_bits`).
+        pub ignored: u16,
     }
 
     impl Grabber {
         pub fn connect(display: Option<&str>) -> Result<Grabber, String> {
             let (conn, screen) = x11rb::connect(display).map_err(|x| format!("cannot connect to the X display: {x}"))?;
             let root = conn.setup().roots[screen].root;
-            Ok(Grabber { conn, root })
+            let mut g = Grabber { conn, root, ignored: LOCK_MASK | MOD2 };
+            if let Some(bits) = g.lock_modifiers() {
+                g.ignored = bits;
+            }
+            Ok(g)
+        }
+
+        /// `lock_bits` for this server's modifier map and keymap.
+        fn lock_modifiers(&self) -> Option<u16> {
+            let mm = self.conn.get_modifier_mapping().ok()?.reply().ok()?;
+            let per = (mm.keycodes.len() / 8).max(1);
+            let modmap: Vec<Vec<Keycode>> = mm.keycodes.chunks(per).map(|c| c.to_vec()).collect();
+            let setup = self.conn.setup();
+            let (min, max) = (setup.min_keycode, setup.max_keycode);
+            let km = self.conn.get_keyboard_mapping(min, max - min + 1).ok()?.reply().ok()?;
+            let per_key = (km.keysyms_per_keycode as usize).max(1);
+            Some(lock_bits(&modmap, |k| {
+                let i = usize::from(k.saturating_sub(min));
+                km.keysyms.get(i * per_key..(i + 1) * per_key).map(<[u32]>::to_vec).unwrap_or_default()
+            }))
+        }
+
+        /// The ignored lock modifiers, by name, for a capability reason.
+        pub fn ignored_names(&self) -> String {
+            let names = [(1u16 << 1, "Lock"), (1 << 4, "Mod2"), (1 << 5, "Mod3"), (1 << 7, "Mod5")];
+            names.iter().filter(|(b, _)| self.ignored & b != 0).map(|(_, n)| *n).collect::<Vec<_>>().join(", ")
         }
 
         /// Keycode for a keysym in the current keyboard map.
@@ -667,7 +723,7 @@ pub mod x11 {
         }
 
         pub fn grab(&self, c: Chord) -> Result<(), GrabFailure> {
-            for extra in LOCKS {
+            for extra in submasks(self.ignored) {
                 let r = self
                     .conn
                     .grab_key(true, self.root, ModMask::from(c.mods | extra), c.keycode, GrabMode::ASYNC, GrabMode::ASYNC)
@@ -686,10 +742,29 @@ pub mod x11 {
         }
 
         pub fn ungrab(&self, c: Chord) {
-            for extra in LOCKS {
+            for extra in submasks(self.ignored) {
                 let _ = self.conn.ungrab_key(c.keycode, self.root, ModMask::from(c.mods | extra));
             }
             let _ = self.conn.flush();
+        }
+
+        /// Like `next_press`, but gives up at `deadline`: for tests, which must fail rather than hang.
+        #[cfg(test)]
+        pub fn next_press_until(&self, chords: &[Chord], deadline: Instant) -> Option<usize> {
+            while Instant::now() < deadline {
+                match self.conn.poll_for_event() {
+                    Ok(Some(Event::KeyPress(ev))) => {
+                        let state = u16::from(ev.state) & !self.ignored & 0xff;
+                        if let Some(i) = chords.iter().position(|c| c.keycode == ev.detail && c.mods == state) {
+                            return Some(i);
+                        }
+                    }
+                    Ok(Some(_)) => {}
+                    Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+                    Err(_) => return None,
+                }
+            }
+            None
         }
 
         /// Block until one of `chords` is pressed and return its index.
@@ -698,7 +773,7 @@ pub mod x11 {
             loop {
                 match self.conn.wait_for_event() {
                     Ok(Event::KeyPress(ev)) => {
-                        let state = u16::from(ev.state) & !IGNORED & 0xff;
+                        let state = u16::from(ev.state) & !self.ignored & 0xff;
                         if let Some(i) = chords.iter().position(|c| c.keycode == ev.detail && c.mods == state) {
                             return Some(i);
                         }
@@ -865,6 +940,18 @@ pub fn capabilities() -> Vec<Capability> {
         Ok(v) => cap("global-hotkey-portal", "disabled", format!("xdg-desktop-portal GlobalShortcuts version {v} is present; binding through it is deferred in this build, bind `hvelf --toggle` as a desktop shortcut instead"), "org.freedesktop.portal.GlobalShortcuts"),
         Err(why) => cap("global-hotkey-portal", "unavailable", format!("GlobalShortcuts portal not reachable: {why}"), "org.freedesktop.portal.GlobalShortcuts"),
     });
+    if let Ok(d) = crate::gnome::read() {
+        let mine = d.hvelf_shortcuts();
+        if !mine.is_empty() {
+            let list = mine.iter().map(|(c, cmd)| format!("{c} runs `{cmd}`")).collect::<Vec<_>>().join(", ");
+            out.push(cap(
+                "global-hotkey-desktop",
+                "available",
+                format!("{list}, as GNOME custom shortcuts; GNOME handles those chords, so hvelf does not grab them itself"),
+                "org.gnome.settings-daemon.plugins.media-keys",
+            ));
+        }
+    }
     out.push(match session_bus_reachable() {
         Ok(()) => cap("toggle-command", "available", "`hvelf --toggle` (also --show, --hide, --quick-launch, --quit) reaches the running board over D-Bus; bind it as a desktop shortcut", "tauri-plugin-single-instance"),
         Err(why) => cap("toggle-command", "unavailable", format!("a second hvelf cannot reach the running one: {why}"), "DBUS_SESSION_BUS_ADDRESS"),
@@ -1015,6 +1102,28 @@ mod tests {
         assert_eq!(parse_chord("alt", map), None);
     }
 
+    #[test]
+    fn lock_modifiers_come_from_the_keymap() {
+        let keysyms = |k: u8| match k {
+            77 => vec![0xff7f],  // Num_Lock
+            78 => vec![0xff14],  // Scroll_Lock
+            66 => vec![0xffe5],  // Caps_Lock
+            64 => vec![0xffe9],  // Alt_L
+            133 => vec![0xffeb], // Super_L
+            _ => vec![],
+        };
+        let map = |slots: [&[u8]; 8]| slots.iter().map(|s| s.to_vec()).collect::<Vec<_>>();
+        // The usual keymap: Num Lock on Mod2, Scroll Lock on nothing.
+        assert_eq!(x11::lock_bits(&map([&[50], &[66], &[37], &[64], &[77], &[], &[133], &[92]]), keysyms), 0b1_0010);
+        // Scroll Lock on Mod3 as well.
+        assert_eq!(x11::lock_bits(&map([&[50], &[66], &[37], &[64], &[77], &[78], &[133], &[92]]), keysyms), 0b11_0010);
+        // A lock key on Mod1 or Mod4 is never ignored: chords are made of Alt and Super.
+        assert_eq!(x11::lock_bits(&map([&[], &[66], &[], &[77], &[], &[], &[78], &[]]), keysyms), 0b10);
+        assert_eq!(x11::submasks(0b1_0010), vec![0, 0b10, 0b1_0000, 0b1_0010]);
+        assert_eq!(x11::submasks(0b11_0010).len(), 8);
+        assert_eq!(x11::submasks(0), vec![0]);
+    }
+
     /// Needs an X server without a window manager: run under
     /// `xvfb-run -a` with HVELF_X11_TEST=1. The test plays the window
     /// manager itself, so it can check what hvelf publishes and asks for.
@@ -1084,5 +1193,50 @@ mod tests {
         }
         other.conn.flush().unwrap();
         assert_eq!(g.next_press(&[chord]), Some(0));
+
+        // With Num Lock on, then Caps Lock as well, then both off again, the chord still reaches hvelf
+        // (DELIVERY-11). XTEST presses the lock keys as a person does, and the live state is checked first, so
+        // the test cannot pass with a lock that never came on.
+        let tap = |k: u8| {
+            for kind in [2u8, 3] {
+                other.conn.xtest_fake_input(kind, k, 0, root, 0, 0, 0).unwrap();
+            }
+            other.conn.flush().unwrap();
+        };
+        let press = || {
+            for (kind, key) in [(2u8, alt), (2, chord.keycode), (3, chord.keycode), (3, alt)] {
+                other.conn.xtest_fake_input(kind, key, 0, root, 0, 0, 0).unwrap();
+            }
+            other.conn.flush().unwrap();
+        };
+        // The lock state as the server has it once it has handled the taps: asked on the injecting connection,
+        // and waited for, since injected input is processed after the request that carried it.
+        let locks_become = |want: u16| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let m = u16::from(other.conn.query_pointer(root).unwrap().reply().unwrap().mask) & 0b1_0010;
+                if m == want || std::time::Instant::now() > deadline {
+                    return m;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        };
+        let soon = || std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let num = g.keycode_for(0xff7f).expect("Num_Lock in keymap");
+        let caps = g.keycode_for(0xffe5).expect("Caps_Lock in keymap");
+        assert_eq!(g.ignored & (1 << 4), 1 << 4, "Num Lock's modifier, Mod2 here, is ignored");
+        tap(num);
+        assert_eq!(locks_become(0b1_0000), 0b1_0000, "Num Lock is on");
+        press();
+        assert_eq!(g.next_press_until(&[chord], soon()), Some(0), "the chord with Num Lock on");
+        tap(caps);
+        assert_eq!(locks_become(0b1_0010), 0b1_0010, "Num Lock and Caps Lock are on");
+        press();
+        assert_eq!(g.next_press_until(&[chord], soon()), Some(0), "the chord with Num Lock and Caps Lock on");
+        tap(num);
+        tap(caps);
+        assert_eq!(locks_become(0), 0, "both are off again");
+        press();
+        assert_eq!(g.next_press_until(&[chord], soon()), Some(0), "the chord with both off");
     }
 }
