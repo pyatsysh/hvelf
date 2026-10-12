@@ -237,16 +237,24 @@ async function dismiss() {
   }
 }
 
+// A key that acts is marked handled. WebKitGTK gives a key the page leaves
+// unhandled back to GTK, and marks the next key press for GTK, meaning that
+// same key; when the key has hidden the board by then, GTK drops it, the mark
+// stays, and the first key of the next summon never reaches the page, so Esc
+// took two presses (DELIVERY-14).
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
+    e.preventDefault();
     dismiss();
     return;
   }
   if (e.ctrlKey && (e.key === "q" || e.key === "Q")) {
+    e.preventDefault();
     dismiss().then(() => invoke("quit"));
     return;
   }
   if (e.key === "Enter" && visible.length > 0) {
+    e.preventDefault();
     pick(visible[0]);
     return;
   }
