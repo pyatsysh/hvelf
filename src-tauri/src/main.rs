@@ -374,7 +374,7 @@ struct VaultTile {
     /// Why the cross cannot close this vault's window here; empty when it can.
     close_reason: String,
     group: String,
-    /// The vault's id in Lab-OS's vault map (`Research/AI/AL`), empty for a
+    /// The vault's id in Lab-OS's vault map (`Research/AI/ML`), empty for a
     /// vault the map does not hold.
     canonical: String,
     /// In a bounded partition (Admin, Career, Personal): searched only when
@@ -2641,12 +2641,12 @@ mod tests {
         assert_eq!(parse_cli(&args(&["--quick-launch"])), Ok(Cli::Run(Some(Action::QuickLaunch))));
         assert_eq!(parse_cli(&args(&["--keep"])), Ok(Cli::Run(Some(Action::Keep))));
         assert_eq!(parse_cli(&args(&["--hidden"])), Ok(Cli::Hidden));
-        assert_eq!(parse_cli(&args(&["--unhide", "AL"])), Ok(Cli::Run(Some(Action::Unhide("AL".into())))));
+        assert_eq!(parse_cli(&args(&["--unhide", "ML"])), Ok(Cli::Run(Some(Action::Unhide("ML".into())))));
         assert_eq!(parse_cli(&args(&["--unhide", "/v/a b"])), Ok(Cli::Run(Some(Action::Unhide("/v/a b".into())))));
         assert!(parse_cli(&args(&["--unhide"])).is_err());
         assert!(parse_cli(&args(&["--unhide", "--quit"])).is_err());
         assert!(parse_cli(&args(&["--unhide", ""])).is_err());
-        assert!(parse_cli(&args(&["--unhide", "AL", "--toggle"])).is_err());
+        assert!(parse_cli(&args(&["--unhide", "ML", "--toggle"])).is_err());
         assert_eq!(parse_cli(&args(&["--capabilities"])), Ok(Cli::Capabilities));
         assert!(parse_cli(&args(&["--toggle", "--quit"])).is_err());
         assert!(parse_cli(&args(&["obsidian://open?vault=x; rm -rf ~"])).is_err());
@@ -2687,11 +2687,11 @@ mod tests {
     fn filing_goes_through_keep_and_never_around_a_refusal() {
         let via = vec!["keep".to_string()];
         let keep = |v: &str, parked| Filing::Keep { vault: v.into(), parked };
-        assert_eq!(filing_for(&via, Some("Research/AI/AL"), false, "Lab-OS"), keep("Research/AI/AL", false));
+        assert_eq!(filing_for(&via, Some("Research/AI/ML"), false, "Lab-OS"), keep("Research/AI/ML", false));
         assert_eq!(filing_for(&via, None, false, "Lab-OS"), keep("Lab-OS", true));
         assert_eq!(filing_for(&via, None, true, "Lab-OS"), Filing::Drop);
         assert_eq!(filing_for(&via, Some("Admin"), true, "Lab-OS"), keep("Admin", false));
-        assert_eq!(filing_for(&[], Some("AL"), false, "exo"), Filing::Write);
+        assert_eq!(filing_for(&[], Some("ML"), false, "exo"), Filing::Write);
         assert_eq!(filing_for(&[], None, true, "exo"), Filing::Write);
     }
 
@@ -2793,10 +2793,10 @@ mod tests {
     fn the_vault_map_makes_one_tile_per_vault_and_marks_the_bounded() {
         let root = std::env::temp_dir().join(format!("hvelf-tiles-map-{} é", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for d in ["Research/AI/AL/.obsidian", "Admin/.obsidian", "Lab-OS/.obsidian", "Learning"] {
+        for d in ["Research/AI/ML/.obsidian", "Admin/.obsidian", "Lab-OS/.obsidian", "Learning"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
-        std::os::unix::fs::symlink(root.join("Research/AI/AL"), root.join("AL")).unwrap();
+        std::os::unix::fs::symlink(root.join("Research/AI/ML"), root.join("ML")).unwrap();
         let r = root.display().to_string();
         let map = vaultmap::parse(
             &serde_json::json!({
@@ -2805,7 +2805,7 @@ mod tests {
                     {"id": "Admin", "path": format!("{r}/Admin"), "partition": "Admin", "bounded": true},
                     {"id": "Lab-OS", "path": format!("{r}/Lab-OS"), "partition": "global"},
                     {"id": "Learning", "path": format!("{r}/Learning"), "partition": "global"},
-                    {"id": "Research/AI/AL", "path": format!("{r}/Research/AI/AL"), "partition": "global", "aliases": ["AL"]},
+                    {"id": "Research/AI/ML", "path": format!("{r}/Research/AI/ML"), "partition": "global", "aliases": ["ML"]},
                 ]
             })
             .to_string(),
@@ -2813,25 +2813,25 @@ mod tests {
         .unwrap();
         let at = |id: &str, path: String, ts: u64| Vault { id: id.into(), name: basename(&path), path, ts, open: false };
         let all = vec![
-            at("aaaa", format!("{r}/AL"), 5),
-            at("bbbb", format!("{r}/Research/AI/AL"), 9),
+            at("aaaa", format!("{r}/ML"), 5),
+            at("bbbb", format!("{r}/Research/AI/ML"), 9),
             at("cccc", format!("{r}/Admin"), 1),
-            at("dddd", "/gone/melt".into(), 3),
+            at("dddd", "/gone/orbit".into(), 3),
         ];
         let t = tiles(&Config::default(), &FocusHistory::default(), all.clone(), Some(&map));
         let by = |id: &str| t.iter().find(|x| x.id == id);
         assert!(by("aaaa").is_none(), "a link is the vault it points at");
-        let al = by("bbbb").unwrap();
-        assert_eq!((al.canonical.as_str(), al.registered, al.missing, al.qualifier.as_str()), ("Research/AI/AL", true, false, ""));
+        let ml = by("bbbb").unwrap();
+        assert_eq!((ml.canonical.as_str(), ml.registered, ml.missing, ml.qualifier.as_str()), ("Research/AI/ML", true, false, ""));
         assert!(by("cccc").unwrap().bounded);
-        assert!(!al.bounded);
+        assert!(!ml.bounded);
         let gone = by("dddd").unwrap();
         assert!(gone.missing && gone.canonical.is_empty());
         let lab = by("map:Lab-OS").unwrap();
         assert!(!lab.registered && !lab.missing);
         assert!(by("map:Learning").is_none(), "a vault of the map without .obsidian is no Obsidian vault");
         assert_eq!(t.len(), 4);
-        // What opens comes first, whatever the stamps say: the gone melt was
+        // What opens comes first, whatever the stamps say: the gone orbit was
         // used after Admin, yet it is last.
         let order: Vec<&str> = t.iter().map(|x| x.id.as_str()).collect();
         assert_eq!(order, ["bbbb", "cccc", "map:Lab-OS", "dddd"]);
@@ -2839,20 +2839,20 @@ mod tests {
         // Hiding the folder hides the link Obsidian lists apart, and a hidden
         // vault does not come back as one Obsidian does not know.
         let mut cfg = Config::default();
-        cfg.hide = vec![format!("{r}/Research/AI/AL")];
+        cfg.hide = vec![format!("{r}/Research/AI/ML")];
         let t = tiles(&cfg, &FocusHistory::default(), all.clone(), Some(&map));
-        assert!(t.iter().all(|x| x.canonical != "Research/AI/AL"), "{:?}", t.iter().map(|x| &x.id).collect::<Vec<_>>());
+        assert!(t.iter().all(|x| x.canonical != "Research/AI/ML"), "{:?}", t.iter().map(|x| &x.id).collect::<Vec<_>>());
         cfg.hide = vec!["Lab-OS".into()];
         let t = tiles(&cfg, &FocusHistory::default(), all, Some(&map));
         assert!(t.iter().all(|x| x.id != "map:Lab-OS"));
 
         // Keep mode ranks the map's vaults by the Obsidian vault in the same
-        // folder: AL was used last, so it follows the lit fallback.
+        // folder: ML was used last, so it follows the lit fallback.
         let exo = keep::Exocortex::from_map(&map);
         let targets = exo.targets();
-        let order = order_for_board(&targets, "Lab-OS", &exo, &[at("bbbb", format!("{r}/Research/AI/AL"), 9)], &Config::default(), &FocusHistory::default());
+        let order = order_for_board(&targets, "Lab-OS", &exo, &[at("bbbb", format!("{r}/Research/AI/ML"), 9)], &Config::default(), &FocusHistory::default());
         let ids: Vec<&str> = order.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, ["Lab-OS", "Research/AI/AL", "Admin", "Learning"]);
+        assert_eq!(ids, ["Lab-OS", "Research/AI/ML", "Admin", "Learning"]);
         assert_eq!(keep_tile(&order[1]).qualifier, "Research/AI");
         let _ = std::fs::remove_dir_all(&root);
     }

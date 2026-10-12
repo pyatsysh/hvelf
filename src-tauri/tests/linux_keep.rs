@@ -177,21 +177,21 @@ struct Fixture {
     env: Vec<(String, String)>,
 }
 
-/// A fake `exo` printing a labos-vault-map/v1 map of `root`: Research/AI/AL
-/// with its link AL, the fallback Lab-OS and a bounded Admin.
+/// A fake `exo` printing a labos-vault-map/v1 map of `root`: Research/AI/ML
+/// with its link ML, the fallback Lab-OS and a bounded Admin.
 fn fake_map(home: &Path, root: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
-    for d in ["Research/AI/AL", "Lab-OS", "Admin"] {
+    for d in ["Research/AI/ML", "Lab-OS", "Admin"] {
         std::fs::create_dir_all(root.join(d)).unwrap();
     }
-    std::os::unix::fs::symlink(root.join("Research/AI/AL"), root.join("AL")).unwrap();
+    std::os::unix::fs::symlink(root.join("Research/AI/ML"), root.join("ML")).unwrap();
     let r = root.display().to_string();
     let map = serde_json::json!({
         "schema": "labos-vault-map/v1", "root": r, "fallback": "Lab-OS",
         "vaults": [
             {"id": "Admin", "path": format!("{r}/Admin"), "partition": "Admin", "bounded": true, "aliases": ["admin"]},
             {"id": "Lab-OS", "path": format!("{r}/Lab-OS"), "partition": "global", "aliases": ["labos"]},
-            {"id": "Research/AI/AL", "path": format!("{r}/Research/AI/AL"), "partition": "global", "aliases": ["AL"]},
+            {"id": "Research/AI/ML", "path": format!("{r}/Research/AI/ML"), "partition": "global", "aliases": ["ML"]},
         ]
     });
     let json = home.join("map.json");
@@ -214,7 +214,7 @@ fn fixture_with(tag: &str, registry: Option<&str>, mapped: bool) -> Fixture {
     let home = root(tag);
     let cfg = home.join("cfg é");
     let vaults = home.join("Vaults root");
-    for v in ["AL", "exo", "archive"] {
+    for v in ["ML", "exo", "archive"] {
         std::fs::create_dir_all(vaults.join(v)).unwrap();
     }
     let toml = home.join("exocortex.toml");
@@ -407,7 +407,7 @@ fn capture_files_refuses_and_never_invents_a_vault() {
         return;
     }
     let f = fixture("file", None);
-    let al = f.vaults.join("AL").join("keeps");
+    let ml = f.vaults.join("ML").join("keeps");
     {
         let board = Board::start(&f);
         let caps = run(&f, &["--capabilities"]);
@@ -415,19 +415,19 @@ fn capture_files_refuses_and_never_invents_a_vault() {
         let kc = caps.iter().find(|c| c["capability"] == "keep-capture").expect("keep-capture record");
         assert_eq!(kc["state"], "available", "{kc}");
 
-        // The title names AL; archive is excluded and never offered.
-        let title = "draft \"q\" - AL - Obsidian v1.6.7";
+        // The title names ML; archive is excluded and never offered.
+        let title = "draft \"q\" - ML - Obsidian v1.6.7";
         let text = "kept on Linux é \"q\" <b>\n  second line\ttab";
         let front = Front::new(title, Some(text));
         board.keep();
         board.wait_log("chars from");
         let log = board.log();
         assert!(log.contains(&format!("{} chars from {}", text.chars().count(), this_exe())), "{log}");
-        assert!(log.contains("AL is lit; vaults AL, exo\n"), "{log}");
+        assert!(log.contains("ML is lit; vaults ML, exo\n"), "{log}");
         board.keep();
-        let got = wait_files(&al, 1);
-        check_note(&got[0], "AL", title, text);
-        board.wait_log("kept \u{2192} AL");
+        let got = wait_files(&ml, 1);
+        check_note(&got[0], "ML", title, text);
+        board.wait_log("kept \u{2192} ML");
         drop(front);
 
         // Over 64 KiB: INCR. No vault in the title, so the last one used.
@@ -437,13 +437,13 @@ fn capture_files_refuses_and_never_invents_a_vault() {
         board.keep();
         wait_for("the second capture", 10, || board.log().matches("chars from").count() >= 2);
         board.keep();
-        let got = wait_files(&al, 2);
+        let got = wait_files(&ml, 2);
         let newest = got.iter().find(|p| std::fs::read_to_string(p).unwrap().contains("a long page")).unwrap();
-        check_note(newest, "AL", "a long page", &big);
+        check_note(newest, "ML", "a long page", &big);
         drop(front);
 
         // Highlighted in another program than the one in front: refused.
-        let front = Front::new("draft - AL - Obsidian v1.6.7", None);
+        let front = Front::new("draft - ML - Obsidian v1.6.7", None);
         match Command::new("xclip").args(["-selection", "primary", "-i"]).stdin(Stdio::piped()).spawn() {
             Ok(mut xclip) => {
                 use std::io::Write;
@@ -459,7 +459,7 @@ fn capture_files_refuses_and_never_invents_a_vault() {
         drop(front);
 
         // Nothing highlighted anywhere: refused.
-        let front = Front::new("draft - AL - Obsidian v1.6.7", None);
+        let front = Front::new("draft - ML - Obsidian v1.6.7", None);
         board.keep();
         board.wait_log("keep: nothing selected");
         std::thread::sleep(Duration::from_millis(500));
@@ -475,14 +475,14 @@ fn capture_files_refuses_and_never_invents_a_vault() {
     let caps: Vec<serde_json::Value> = serde_json::from_slice(&run(&g, &["--capabilities"]).stdout).unwrap();
     let kc = caps.iter().find(|c| c["capability"] == "keep-capture").unwrap();
     assert_eq!(kc["state"], "unavailable", "{kc}");
-    let front = Front::new("draft - AL - Obsidian v1.6.7", Some("text"));
+    let front = Front::new("draft - ML - Obsidian v1.6.7", Some("text"));
     board.keep();
     board.wait_log("does not exist");
     assert!(!missing.exists(), "a capture never creates a vault root");
     drop(front);
     drop(board);
 
-    // Lab-OS's vault map: the title's AL is an alias of Research/AI/AL, the
+    // Lab-OS's vault map: the title's ML is an alias of Research/AI/ML, the
     // keep lands there and records the canonical id; the bounded Admin is
     // offered and marked, and exocortex.toml is not read at all.
     let h = fixture_with("mapped", Some("this is not toml ["), true);
@@ -493,13 +493,13 @@ fn capture_files_refuses_and_never_invents_a_vault() {
     assert_eq!(get("vault-map")["state"], "available", "{}", get("vault-map"));
     assert!(get("vault-map")["reason"].as_str().unwrap().starts_with("3 vaults under"));
     assert_eq!(get("keep-capture")["state"], "available", "{}", get("keep-capture"));
-    let title = "draft - AL - Obsidian v1.6.7";
+    let title = "draft - ML - Obsidian v1.6.7";
     let front = Front::new(title, Some("a mapped keep"));
     board.keep();
-    board.wait_log("Research/AI/AL is lit; vaults Research/AI/AL, Admin, Lab-OS\n");
+    board.wait_log("Research/AI/ML is lit; vaults Research/AI/ML, Admin, Lab-OS\n");
     board.keep();
-    let got = wait_files(&mapped.join("Research/AI/AL/keeps"), 1);
-    check_note(&got[0], "Research/AI/AL", title, "a mapped keep");
+    let got = wait_files(&mapped.join("Research/AI/ML/keeps"), 1);
+    check_note(&got[0], "Research/AI/ML", title, "a mapped keep");
     assert_eq!(keeps_in(&mapped).len(), 1, "one keep, reached through the link only once");
     drop(front);
 
@@ -528,8 +528,8 @@ fn labos_kernel() -> Option<PathBuf> {
     Some(k)
 }
 
-/// A vault root like the native one, Lab-OS the fallback, Research/AI/AL with
-/// its link AL, and a bounded Admin; `keep`'s own instance table for it; a
+/// A vault root like the native one, Lab-OS the fallback, Research/AI/ML with
+/// its link ML, and a bounded Admin; `keep`'s own instance table for it; a
 /// workspace catalogue with one private entry, whose id and name are private
 /// territory; the folders in `synced` as the synced folder pairs. The board
 /// reads the kernel's own vault map of that table, and files through the
@@ -538,10 +538,10 @@ fn keep_fixture(tag: &str, kernel: &Path, synced: &[&str]) -> Fixture {
     let home = root(tag);
     let cfg = home.join("cfg é");
     let vaults = home.join("Vaults root");
-    for d in ["Lab-OS", "Research/AI/AL", "Admin"] {
+    for d in ["Lab-OS", "Research/AI/ML", "Admin"] {
         std::fs::create_dir_all(vaults.join(d)).unwrap();
     }
-    std::os::unix::fs::symlink(vaults.join("Research/AI/AL"), vaults.join("AL")).unwrap();
+    std::os::unix::fs::symlink(vaults.join("Research/AI/ML"), vaults.join("ML")).unwrap();
     let toml = home.join("exocortex.toml");
     std::fs::write(
         &toml,
@@ -627,7 +627,7 @@ fn files_in(dir: &Path) -> Vec<PathBuf> {
 /// Captures go through Lab-OS's own `keep` (rc.7's, with the private-name
 /// guard for synced vaults, FA-013). With the whole vault root a synced pair:
 /// a plain passage is filed into Lab-OS in keep's format; a passage naming
-/// the private entry is refused there and in Research/AI/AL, the refusal
+/// the private entry is refused there and in Research/AI/ML, the refusal
 /// keeps it on the board (the chord again is refused again), and nothing at
 /// all is written, not even to the unrouted folder; the same passage is filed
 /// into the bounded Admin, which never syncs. With no synced pair, it is filed
@@ -691,14 +691,14 @@ fn capture_through_keep_is_refused_in_a_synced_vault_and_filed_elsewhere() {
         drop(front);
     }
     save_log(&f, "2 private into Lab-OS");
-    // Into Research/AI/AL, synced too: refused.
+    // Into Research/AI/ML, synced too: refused.
     {
         let board = Board::start(&f);
-        let front = Front::new("notes - AL - Obsidian v1.6.7", Some(private));
+        let front = Front::new("notes - ML - Obsidian v1.6.7", Some(private));
         board.keep();
-        board.wait_log("Research/AI/AL is lit;");
+        board.wait_log("Research/AI/ML is lit;");
         board.keep();
-        board.wait_log("chars not filed into Research/AI/AL: refused");
+        board.wait_log("chars not filed into Research/AI/ML: refused");
         drop(front);
     }
     save_log(&f, "3 private into Research-AI-AL");
@@ -752,7 +752,7 @@ fn a_missing_keep_command_captures_nothing() {
     let caps: Vec<serde_json::Value> = serde_json::from_slice(&run(&f, &["--capabilities"]).stdout).unwrap();
     let kf = caps.iter().find(|c| c["capability"] == "keep-filing").unwrap();
     assert_eq!(kf["state"], "unavailable", "{kf}");
-    let front = Front::new("draft - AL - Obsidian v1.6.7", Some("text"));
+    let front = Front::new("draft - ML - Obsidian v1.6.7", Some("text"));
     board.keep();
     board.wait_log("no-such-keep-command is not on PATH (keepCommand in config.json), so nothing was captured");
     std::thread::sleep(Duration::from_millis(300));

@@ -32,7 +32,7 @@ pub struct Exocortex {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
     /// What the keep records as `vault:` and its path under the root: a
-    /// canonical id such as `Research/AI/AL`, or a folder name at the root.
+    /// canonical id such as `Research/AI/ML`, or a folder name at the root.
     pub id: String,
     /// Names a window title may carry for it.
     pub names: Vec<String>,
@@ -221,8 +221,8 @@ pub fn list_vaults(root: &Path) -> Vec<String> {
 }
 
 /// Pick the vault whose name appears in the window title as a whole word
-/// (a short name like "AL" must not fire on "Journal"); the longest match
-/// wins so "cdft_dimInterp" beats "cDFT". Case-insensitive.
+/// (a short name like "ML" must not fire on "Html"); the longest match
+/// wins so "cfd_meshFit" beats "cFD". Case-insensitive.
 #[cfg(test)]
 pub fn preselect(title: &str, vaults: &[String]) -> Option<String> {
     let targets: Vec<Target> = vaults
@@ -344,7 +344,7 @@ pub fn unrouted_path(root: &Path, fallback: &str, id: &str) -> PathBuf {
 /// Write a keep under `<root>/<vault>/` only when that vault's folder is
 /// there. A capture never creates a vault: a vanished or misnamed one fails
 /// loudly, as the native `keep` refuses a vault that does not exist. The
-/// vault is a plain path under the root (`Research/AI/AL`), and a link that
+/// vault is a plain path under the root (`Research/AI/ML`), and a link that
 /// leads out of the root is refused, not followed.
 pub fn write_in_vault(root: &Path, vault: &str, path: &Path, bytes: &[u8]) -> io::Result<()> {
     if !crate::vaultmap::plain_relative(vault) {
@@ -446,16 +446,16 @@ threshold = 0.45
 
     #[test]
     fn preselect_longest_case_insensitive() {
-        let vaults = v(&["AL", "cDFT", "cdft_dimInterp", "exo", "melt"]);
+        let vaults = v(&["ML", "cFD", "cfd_meshFit", "exo", "orbit"]);
         assert_eq!(
-            preselect("notes.md - cdft_diminterp - Obsidian v1.6", &vaults),
-            Some("cdft_dimInterp".into())
+            preselect("notes.md - cfd_meshfit - Obsidian v1.6", &vaults),
+            Some("cfd_meshFit".into())
         );
-        assert_eq!(preselect("Results - CDFT - Obsidian", &vaults), Some("cDFT".into()));
+        assert_eq!(preselect("Results - CFD - Obsidian", &vaults), Some("cFD".into()));
         assert_eq!(preselect("Calculus of variations", &vaults), None);
-        assert_eq!(preselect("Journal - Obsidian v1.6", &vaults), None);
-        assert_eq!(preselect("notes - AL - Obsidian v1.6", &vaults), Some("AL".into()));
-        assert_eq!(preselect("(al) active learning", &vaults), Some("AL".into()));
+        assert_eq!(preselect("Html notes - Obsidian v1.6", &vaults), None);
+        assert_eq!(preselect("notes - ML - Obsidian v1.6", &vaults), Some("ML".into()));
+        assert_eq!(preselect("(ml) machine learning", &vaults), Some("ML".into()));
         assert_eq!(preselect("Untitled - Notepad", &vaults), None);
         assert_eq!(preselect("anything", &[]), None);
     }
@@ -473,7 +473,7 @@ threshold = 0.45
         let meta = Meta {
             id: "20260822T013045-3f9a1c7e".into(),
             ts: "2026-08-22T01:30:45+01:00".into(),
-            vault: "AL".into(),
+            vault: "ML".into(),
             app: "chrome.exe".into(),
             title: "A \"quoted\" title".into(),
             url: Some("https://example.org/x?y=1".into()),
@@ -484,7 +484,7 @@ threshold = 0.45
 id: 20260822T013045-3f9a1c7e\n\
 ts: 2026-08-22T01:30:45+01:00\n\
 source: selection\n\
-vault: AL\n\
+vault: ML\n\
 app: chrome.exe\n\
 title: \"A \\\"quoted\\\" title\"\n\
 url: \"https://example.org/x?y=1\"\n\
@@ -538,8 +538,8 @@ hello world\n";
     fn paths() {
         let root = Path::new(r"D:\root");
         assert_eq!(
-            keep_path(root, "AL", "2026-08", "id1"),
-            PathBuf::from(r"D:\root").join("AL").join("keeps").join("2026-08").join("id1.md")
+            keep_path(root, "ML", "2026-08", "id1"),
+            PathBuf::from(r"D:\root").join("ML").join("keeps").join("2026-08").join("id1.md")
         );
         assert_eq!(
             unrouted_path(root, "exo", "id1"),
@@ -573,11 +573,11 @@ hello world\n";
         fs::create_dir_all(root.join("archive")).unwrap();
         fs::create_dir_all(root.join(".obsidian")).unwrap();
         fs::write(root.join("notes.md"), "x").unwrap();
-        std::os::unix::fs::symlink(&elsewhere, root.join("AL")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("ML")).unwrap();
         std::os::unix::fs::symlink(root.join("gone"), root.join("dangling")).unwrap();
-        assert_eq!(list_vaults(&root), ["AL", "archive", "exo"]);
+        assert_eq!(list_vaults(&root), ["archive", "exo", "ML"]);
         let exo = Exocortex { root: root.clone(), fallback: "exo".into(), excluded: vec!["archive".into()], ..Exocortex::default() };
-        assert_eq!(exo.vaults(), ["AL", "exo"]);
+        assert_eq!(exo.vaults(), ["exo", "ML"]);
         assert_eq!(exo.unusable(), None);
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&elsewhere);
@@ -596,17 +596,17 @@ hello world\n";
     #[test]
     fn a_capture_never_creates_a_vault() {
         let root = scratch("write");
-        fs::create_dir_all(root.join("AL")).unwrap();
+        fs::create_dir_all(root.join("ML")).unwrap();
         let into = |v: &str| keep_path(&root, v, "2026-10", "id1");
-        write_in_vault(&root, "AL", &into("AL"), b"body\n").unwrap();
-        assert_eq!(fs::read(into("AL")).unwrap(), b"body\n");
+        write_in_vault(&root, "ML", &into("ML"), b"body\n").unwrap();
+        assert_eq!(fs::read(into("ML")).unwrap(), b"body\n");
         let e = write_in_vault(&root, "Nope", &into("Nope"), b"x").unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         assert!(!root.join("Nope").exists());
         // A canonical id is a path under the root.
-        fs::create_dir_all(root.join("Research/AI/AL")).unwrap();
-        write_in_vault(&root, "Research/AI/AL", &into("Research/AI/AL"), b"x\n").unwrap();
-        assert!(root.join("Research/AI/AL/keeps/2026-10/id1.md").is_file());
+        fs::create_dir_all(root.join("Research/AI/ML")).unwrap();
+        write_in_vault(&root, "Research/AI/ML", &into("Research/AI/ML"), b"x\n").unwrap();
+        assert!(root.join("Research/AI/ML/keeps/2026-10/id1.md").is_file());
         let e = write_in_vault(&root, "Research/AI/XX", &into("Research/AI/XX"), b"x").unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         for bad in ["", ".", "..", "../x", "/abs", "a//b", "a/../b", "a\\b"] {
@@ -629,14 +629,14 @@ hello world\n";
     fn titles_pick_vaults_by_any_of_their_names() {
         let t = |id: &str, names: &[&str]| Target { id: id.into(), names: names.iter().map(|s| s.to_string()).collect(), bounded: false };
         let targets = [
-            t("Research/AI/AL", &["AL"]),
-            t("Lab-OS", &["Lab-OS", "chat-gpt", "labos"]),
+            t("Research/AI/ML", &["ML"]),
+            t("Lab-OS", &["Lab-OS", "old-notes", "labos"]),
             t("Research", &["Research"]),
         ];
-        assert_eq!(preselect_target("notes - AL - Obsidian v1.6.7", &targets).as_deref(), Some("Research/AI/AL"));
+        assert_eq!(preselect_target("notes - ML - Obsidian v1.6.7", &targets).as_deref(), Some("Research/AI/ML"));
         assert_eq!(preselect_target("labos - Visual Studio Code", &targets).as_deref(), Some("Lab-OS"));
-        assert_eq!(preselect_target("AL Research plan", &targets).as_deref(), Some("Research"), "longest name wins");
-        assert_eq!(preselect_target("Journal", &targets), None);
+        assert_eq!(preselect_target("ML Research plan", &targets).as_deref(), Some("Research"), "longest name wins");
+        assert_eq!(preselect_target("Html", &targets), None);
     }
 
     #[test]

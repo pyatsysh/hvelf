@@ -315,26 +315,26 @@ fn the_vault_map_dedups_links_and_marks_bounded_unknown_and_missing() {
     let bin = home.join("bin");
     fake_bin(&bin, "xdg-mime", "exit 0");
     let v = home.join("Vaults");
-    for d in ["Research/AI/AL/.obsidian", "Admin/.obsidian", "Lab-OS/.obsidian"] {
+    for d in ["Research/AI/ML/.obsidian", "Admin/.obsidian", "Lab-OS/.obsidian"] {
         std::fs::create_dir_all(v.join(d)).unwrap();
     }
-    std::os::unix::fs::symlink(v.join("Research/AI/AL"), v.join("AL")).unwrap();
+    std::os::unix::fs::symlink(v.join("Research/AI/ML"), v.join("ML")).unwrap();
     let r = v.display().to_string();
     let map = serde_json::json!({
         "schema": "labos-vault-map/v1", "root": r, "fallback": "Lab-OS",
         "vaults": [
             {"id": "Admin", "path": format!("{r}/Admin"), "partition": "Admin", "bounded": true},
             {"id": "Lab-OS", "path": format!("{r}/Lab-OS"), "partition": "global"},
-            {"id": "Research/AI/AL", "path": format!("{r}/Research/AI/AL"), "partition": "global", "aliases": ["AL"]},
+            {"id": "Research/AI/ML", "path": format!("{r}/Research/AI/ML"), "partition": "global", "aliases": ["ML"]},
         ]
     });
     std::fs::write(home.join("map.json"), map.to_string()).unwrap();
     fake_bin(&bin, "exo", &format!("[ \"$1 $2\" = \"vaults --json\" ] && /bin/cat '{}'", home.join("map.json").display()));
     let registry = serde_json::json!({"vaults": {
-        "1111111111111111": {"path": format!("{r}/AL"), "ts": 5},
-        "2222222222222222": {"path": format!("{r}/Research/AI/AL"), "ts": 9},
+        "1111111111111111": {"path": format!("{r}/ML"), "ts": 5},
+        "2222222222222222": {"path": format!("{r}/Research/AI/ML"), "ts": 9},
         "3333333333333333": {"path": format!("{r}/Admin"), "ts": 1},
-        "4444444444444444": {"path": "/gone/Dropbox/melt", "ts": 3},
+        "4444444444444444": {"path": "/gone/Dropbox/orbit", "ts": 3},
     }});
     std::fs::create_dir_all(cfg.join("obsidian")).unwrap();
     std::fs::write(cfg.join("obsidian/obsidian.json"), registry.to_string()).unwrap();
@@ -344,7 +344,7 @@ fn the_vault_map_dedups_links_and_marks_bounded_unknown_and_missing() {
     let ids: Vec<&str> = t.iter().map(|x| x["id"].as_str().unwrap()).collect();
     assert_eq!(t.len(), 4, "{ids:?}");
     let by = |id: &str| t.iter().find(|x| x["id"] == id).unwrap_or_else(|| panic!("no tile {id} in {ids:?}"));
-    assert_eq!(by("2222222222222222")["canonical"], "Research/AI/AL", "the one Obsidian used last");
+    assert_eq!(by("2222222222222222")["canonical"], "Research/AI/ML", "the one Obsidian used last");
     assert!(!ids.contains(&"1111111111111111"), "the link is the same vault");
     assert_eq!(by("3333333333333333")["bounded"], true);
     assert_eq!(by("4444444444444444")["missing"], true);

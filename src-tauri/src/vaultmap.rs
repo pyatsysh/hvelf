@@ -3,8 +3,8 @@
 // keyed by its path under the vault root after links resolve, with the names
 // that alias it and the partition it belongs to. hvelf reads the map and
 // never derives one of its own, so the board, the keep chord and exo agree
-// on what a vault is: a link such as ~/Lab/Vaults/AL is a name for
-// Research/AI/AL, not a second vault, and a bounded vault stays bounded.
+// on what a vault is: a link such as ~/Lab/Vaults/ML is a name for
+// Research/AI/ML, not a second vault, and a bounded vault stays bounded.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -42,7 +42,7 @@ struct EntryFile {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MapVault {
-    /// The path under the root after links resolve, e.g. `Research/AI/AL`.
+    /// The path under the root after links resolve, e.g. `Research/AI/ML`.
     pub id: String,
     pub path: PathBuf,
     /// `global`, or the bounded partition the vault sits in (`Admin`).
@@ -224,9 +224,9 @@ mod tests {
             "vaults": [
                 {"id": "Admin", "path": format!("{root}/Admin"), "partition": "Admin", "bounded": true, "aliases": ["admin"]},
                 {"id": "Admin/matter-a", "path": format!("{root}/Admin/matter-a"), "partition": "Admin", "aliases": []},
-                {"id": "Lab-OS", "path": format!("{root}/Lab-OS"), "partition": "global", "aliases": ["Research/AI/chat-gpt", "chat-gpt", "labos"]},
-                {"id": "Research/AI/AL", "path": format!("{root}/Research/AI/AL"), "partition": "global", "aliases": ["AL"]},
-                {"id": "Research/DFT/classical-DFT-lab", "path": format!("{root}/Research/DFT/classical-DFT-lab"), "partition": "global", "aliases": ["cDFT", "cdft"]},
+                {"id": "Lab-OS", "path": format!("{root}/Lab-OS"), "partition": "global", "aliases": ["Research/AI/old-notes", "old-notes", "labos"]},
+                {"id": "Research/AI/ML", "path": format!("{root}/Research/AI/ML"), "partition": "global", "aliases": ["ML"]},
+                {"id": "Research/CFD/fluids-lab", "path": format!("{root}/Research/CFD/fluids-lab"), "partition": "global", "aliases": ["cFD", "cfd"]},
             ]
         })
         .to_string()
@@ -240,12 +240,12 @@ mod tests {
     fn a_map_parses_with_partitions_and_names() {
         let m = parse(&sample("/v")).unwrap();
         assert_eq!(m.vaults.len(), 5);
-        assert_eq!(by(&m, "AL").id, "Research/AI/AL");
-        assert_eq!(by(&m, "AL").path, PathBuf::from("/v/Research/AI/AL"));
+        assert_eq!(by(&m, "ML").id, "Research/AI/ML");
+        assert_eq!(by(&m, "ML").path, PathBuf::from("/v/Research/AI/ML"));
         assert!(by(&m, "Admin").bounded() && by(&m, "admin").bounded());
-        assert!(!by(&m, "AL").bounded());
-        assert_eq!(by(&m, "AL").name(), "AL");
-        assert_eq!(by(&m, "Lab-OS").title_names(), ["Lab-OS", "chat-gpt", "labos"]);
+        assert!(!by(&m, "ML").bounded());
+        assert_eq!(by(&m, "ML").name(), "ML");
+        assert_eq!(by(&m, "Lab-OS").title_names(), ["Lab-OS", "old-notes", "labos"]);
     }
 
     #[test]
@@ -285,12 +285,12 @@ mod tests {
     fn a_link_is_the_vault_it_points_at() {
         let root = std::env::temp_dir().join(format!("hvelf-map-{} é", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("Research/AI/AL")).unwrap();
-        std::os::unix::fs::symlink(root.join("Research/AI/AL"), root.join("AL")).unwrap();
+        std::fs::create_dir_all(root.join("Research/AI/ML")).unwrap();
+        std::os::unix::fs::symlink(root.join("Research/AI/ML"), root.join("ML")).unwrap();
         let m = parse(&sample(&root.display().to_string())).unwrap();
         let at = m.locator();
-        assert_eq!(at.at(&root.join("AL")).unwrap().id, "Research/AI/AL");
-        assert_eq!(at.at(&root.join("Research/AI/AL/")).unwrap().id, "Research/AI/AL");
+        assert_eq!(at.at(&root.join("ML")).unwrap().id, "Research/AI/ML");
+        assert_eq!(at.at(&root.join("Research/AI/ML/")).unwrap().id, "Research/AI/ML");
         assert!(at.at(&root.join("Research")).is_none());
         let _ = std::fs::remove_dir_all(&root);
     }

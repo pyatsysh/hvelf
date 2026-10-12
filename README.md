@@ -61,7 +61,7 @@ Window observation, hotkeys and window control depend on the desktop. The
   links, all in one JSON config. A deep link opens a vault straight onto a
   named note.
 - **Same-named vaults kept apart**: Obsidian names a vault after its folder,
-  so a copy of `moreland-dispute` somewhere else is a second vault with the
+  so a copy of `research-notes` somewhere else is a second vault with the
   same name. hvelf labels the two by their parent folder and acts on
   Obsidian's vault id, so the tile you press is the vault you get.
 - **Light**: one small binary on Tauri 2 (WebView2 on Windows, WebKitGTK on
@@ -104,10 +104,10 @@ first run:
   "hideOnBlur": true,
   "hide": ["OldVault"],
   "groups": [
-    { "name": "research", "vaults": ["melt", "cDFT", "AISTATS"] },
+    { "name": "research", "vaults": ["orbit", "cFD", "optics"] },
     { "name": "admin", "vaults": ["taxes"] }
   ],
-  "deepLinks": { "melt": "index" }
+  "deepLinks": { "orbit": "index" }
 }
 ```
 
@@ -144,7 +144,7 @@ first run:
   Lab-OS's `/opt/labos/current/kernel/instance/exocortex.toml`.
 - Entries in `hide`, `groups` and `deepLinks` name a vault by its name, or by
   its full path, which is the only way to name one of two vaults that share a
-  name (`"hide": ["D:\\delme\\moreland-dispute"]`).
+  name (`"hide": ["D:\\delme\\research-notes"]`).
 - The config is read at startup, so restart hvelf after editing it by hand. A
   tile removed from the board, or put back from the tray, changes at once.
 
@@ -183,9 +183,9 @@ so.
 
 Where keeps go comes from Lab-OS's vault map when `vaultMap` names one (the
 Linux default). Its vaults are identified by their path under the vault root
-once links resolve, such as `Research/AI/AL`; a keep lands at
+once links resolve, such as `Research/AI/ML`; a keep lands at
 `<root>/<id>/keeps/<YYYY-MM>/<keep id>.md` and records `vault: <id>`. A
-name the map lists for a vault (a link such as `AL`, an old name) selects
+name the map lists for a vault (a link such as `ML`, an old name) selects
 it from a window title like its own name. Bounded vaults are marked, the
 fallback is the map's, and exocortex.toml is not read. A map that cannot be
 read leaves nothing to file into, and the chord says why.

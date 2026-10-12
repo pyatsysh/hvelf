@@ -201,21 +201,21 @@ mod tests {
         vec![p.display().to_string()]
     }
 
-    const RECEIPT: &str = "kept text \u{2192} Research/AI/AL (named): 3 words, 20261011T031500-1a2b3c4d\n  /v/Research/AI/AL/keeps/2026-10/20261011T031500-1a2b3c4d.md\n  \u{201c}notes on things\u{201d}\n";
+    const RECEIPT: &str = "kept text \u{2192} Research/AI/ML (named): 3 words, 20261011T031500-1a2b3c4d\n  /v/Research/AI/ML/keeps/2026-10/20261011T031500-1a2b3c4d.md\n  \u{201c}notes on things\u{201d}\n";
 
     #[test]
     fn the_command_line_is_the_configured_one_then_the_flags() {
         let cmd = vec!["python3".to_string(), "/k/bin/keep".to_string()];
         assert_eq!(
-            argv(&cmd, "Research/AI/AL", "hvelf capture from x"),
-            ["python3", "/k/bin/keep", "--stdin", "--vault", "Research/AI/AL", "--source-note", "hvelf capture from x"]
+            argv(&cmd, "Research/AI/ML", "hvelf capture from x"),
+            ["python3", "/k/bin/keep", "--stdin", "--vault", "Research/AI/ML", "--source-note", "hvelf capture from x"]
         );
     }
 
     #[test]
     fn the_source_note_says_where_from_and_whether_a_vault_was_chosen() {
-        assert_eq!(source_note("gnome-terminal-server", "draft - AL - Obsidian", None, false),
-                   "hvelf capture from gnome-terminal-server: draft - AL - Obsidian");
+        assert_eq!(source_note("gnome-terminal-server", "draft - ML - Obsidian", None, false),
+                   "hvelf capture from gnome-terminal-server: draft - ML - Obsidian");
         assert_eq!(source_note("x", "  ", None, true), "hvelf capture from x, no vault chosen");
         assert_eq!(source_note("", "t", Some(" https://e.org/a "), false), "hvelf capture from an unknown program: t <https://e.org/a>");
     }
@@ -223,9 +223,9 @@ mod tests {
     #[test]
     fn the_receipt_gives_vault_id_and_path_never_the_quote() {
         let (v, id, path) = parse_receipt(RECEIPT);
-        assert_eq!(v.as_deref(), Some("Research/AI/AL"));
+        assert_eq!(v.as_deref(), Some("Research/AI/ML"));
         assert_eq!(id.as_deref(), Some("20261011T031500-1a2b3c4d"));
-        assert_eq!(path, Some(PathBuf::from("/v/Research/AI/AL/keeps/2026-10/20261011T031500-1a2b3c4d.md")));
+        assert_eq!(path, Some(PathBuf::from("/v/Research/AI/ML/keeps/2026-10/20261011T031500-1a2b3c4d.md")));
         assert_eq!(parse_receipt(""), (None, None, None));
         assert_eq!(parse_receipt("something else entirely"), (None, None, None));
     }
@@ -240,14 +240,14 @@ mod tests {
             args.display(), got.display(), RECEIPT.replace('\'', "'\\''")
         ));
         let body = "line one é \"q\"\n\tline two";
-        let out = file(&cmd, "Research/AI/AL", "hvelf capture from x: t", body, Duration::from_secs(10));
+        let out = file(&cmd, "Research/AI/ML", "hvelf capture from x: t", body, Duration::from_secs(10));
         assert_eq!(out, Outcome::Kept {
-            vault: "Research/AI/AL".into(),
+            vault: "Research/AI/ML".into(),
             id: Some("20261011T031500-1a2b3c4d".into()),
-            path: Some(PathBuf::from("/v/Research/AI/AL/keeps/2026-10/20261011T031500-1a2b3c4d.md")),
+            path: Some(PathBuf::from("/v/Research/AI/ML/keeps/2026-10/20261011T031500-1a2b3c4d.md")),
         });
         assert_eq!(std::fs::read_to_string(&got).unwrap(), body, "the passage verbatim on stdin");
-        assert_eq!(std::fs::read_to_string(&args).unwrap(), "--stdin\n--vault\nResearch/AI/AL\n--source-note\nhvelf capture from x: t\n");
+        assert_eq!(std::fs::read_to_string(&args).unwrap(), "--stdin\n--vault\nResearch/AI/ML\n--source-note\nhvelf capture from x: t\n");
         let _ = std::fs::remove_dir_all(&d);
     }
 
