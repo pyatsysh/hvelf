@@ -43,10 +43,13 @@ windows = { version = "0.61", features = [
 # Linux desktop adapters: x11rb speaks the X protocol in pure Rust for EWMH
 # window observation, key grabs and the keep chord's selection and its owner
 # (X-Resource); zbus (already pulled in by the single-instance plugin) probes
-# the GlobalShortcuts portal.
+# the GlobalShortcuts portal. gtk and gdkx11 (already pulled in by Tauri) give
+# the board the keyboard focus with a timestamp from the X server.
 [target.'cfg(target_os = "linux")'.dependencies]
 x11rb = { version = "0.13", default-features = false, features = ["xtest", "res"] }
 zbus = { version = "5", default-features = false, features = ["blocking-api"] }
+gtk = "0.18"
+gdkx11 = "0.18"
 
 [profile.release]
 lto = true

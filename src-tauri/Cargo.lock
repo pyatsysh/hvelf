@@ -1497,6 +1497,8 @@ name = "hvelf"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "gdkx11",
+ "gtk",
  "serde",
  "serde_json",
  "sha2",

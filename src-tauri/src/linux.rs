@@ -60,6 +60,33 @@ pub fn session() -> Session {
     detect_session_from(env)
 }
 
+// ------------------------------------------------------------ board focus
+
+/// Raise the board and give it the keyboard focus, on GTK's main thread (main.rs, `show_board`). tao's `set_focus`
+/// asks for the focus only if GTK has already shown the window, which the `show` just before it may not have done
+/// yet; and GTK stamps the board, on its map or in its focus request, with the time of the board's own last input.
+/// Once the user has typed in another window since, mutter's focus-stealing prevention finds that time older than
+/// the other window's and shows the board without the focus: Esc and the filter's keys go to the window behind
+/// until a click (the owner's report of 12 October 2026). A timestamp read from the X server now is later than the
+/// chord that summoned the board, so the window manager grants the focus, whether GTK still has to map the window
+/// (the time becomes its user time) or has shown it already (the time goes in `_NET_ACTIVE_WINDOW`).
+pub fn present(w: &tauri::WebviewWindow) {
+    use gtk::prelude::*;
+    let Ok(gw) = w.gtk_window() else {
+        let _ = w.set_focus();
+        return;
+    };
+    if !gw.is_realized() {
+        gw.realize();
+    }
+    let now = gw
+        .window()
+        .and_then(|g| g.downcast::<gdkx11::X11Window>().ok())
+        .map(|x| gdkx11::functions::x11_get_server_time(&x))
+        .unwrap_or(0);
+    gw.present_with_time(now);
+}
+
 // ------------------------------------------------------------ directories
 
 fn home() -> PathBuf {

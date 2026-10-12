@@ -1250,8 +1250,7 @@ fn launch(app: AppHandle, cfg: State<SharedConfig>, id: String) -> Result<(), Fa
     // The board may have gone already; bring it back to say why.
     if r.is_err() {
         if let Some(w) = app.get_webview_window("main") {
-            let _ = w.show();
-            let _ = w.set_focus();
+            show_board(&w);
         }
     }
     r
@@ -1264,8 +1263,7 @@ fn launch_or_tell(app: &AppHandle, cfg: &Config, id: &str) {
         eprintln!("hvelf: {}: {}", f.code, f.message);
         let _ = app.emit("hvelf-notice", f);
         if let Some(w) = app.get_webview_window("main") {
-            let _ = w.show();
-            let _ = w.set_focus();
+            show_board(&w);
         }
     }
 }
@@ -1574,8 +1572,7 @@ fn file_through_keep(app: &AppHandle, keep: &KeepState, mut p: Pending, vault: S
     *keep.0.lock().unwrap() = Some(p);
     let _ = app.emit("hvelf-notice", Failure::new(code, message, "keep-capture"));
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.set_focus();
+        show_board(&w);
         let _ = w.emit("keep", ());
     }
 }
@@ -1805,8 +1802,7 @@ fn queue_keep(
     };
     *keep.0.lock().unwrap() = Some(pending);
     if let Some(w) = app.get_webview_window("main") {
-        let _ = w.show();
-        let _ = w.set_focus();
+        show_board(&w);
         let _ = w.emit("keep", ());
     }
 }
@@ -2278,13 +2274,27 @@ fn quit(app: AppHandle) {
     app.exit(0);
 }
 
+/// Bring the board up with the keyboard focus, so that its keys work at once, Esc first: on X11 through GTK with a
+/// timestamp from the X server (linux.rs, `present`), elsewhere through tao.
+fn show_board(w: &tauri::WebviewWindow) {
+    let _ = w.show();
+    #[cfg(target_os = "linux")]
+    {
+        if linux::session() == linux::Session::X11 {
+            let board = w.clone();
+            let _ = w.run_on_main_thread(move || linux::present(&board));
+            return;
+        }
+    }
+    let _ = w.set_focus();
+}
+
 fn toggle_window(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
         if w.is_visible().unwrap_or(false) {
             let _ = w.hide();
         } else {
-            let _ = w.show();
-            let _ = w.set_focus();
+            show_board(&w);
         }
     }
 }
@@ -2424,8 +2434,7 @@ fn perform(app: &AppHandle, action: Action) {
         Action::Toggle => toggle_window(app),
         Action::Show => {
             if let Some(w) = app.get_webview_window("main") {
-                let _ = w.show();
-                let _ = w.set_focus();
+                show_board(&w);
             }
         }
         Action::Hide => hide_window(app.clone()),
