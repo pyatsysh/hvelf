@@ -52,6 +52,10 @@ open ones glowing.
 - **Customisable tiles**: groups, ordering, hidden vaults and per-vault deep
   links, all in one JSON config. A deep link opens a vault straight onto a
   named note.
+- **Same-named vaults kept apart**: Obsidian names a vault after its folder,
+  so a copy of `moreland-dispute` somewhere else is a second vault with the
+  same name. hvelf labels the two by their parent folder and acts on
+  Obsidian's vault id, so the tile you press is the vault you get.
 - **Light**: one small binary on Tauri 2 and WebView2, with no Electron and no
   background CPU.
 
@@ -98,6 +102,9 @@ sits silent until the hotkey.
 - `deepLinks` make a tile open a specific note, via `&file=` in the URI.
 - `keep` is the capture hotkey (default `alt+k`, empty to disable) and
   `exocortex` the registry it reads, see below.
+- Entries in `hide`, `groups` and `deepLinks` name a vault by its name, or by
+  its full path, which is the only way to name one of two vaults that share a
+  name (`"hide": ["D:\\delme\\moreland-dispute"]`).
 - The config is read at startup, so restart hvelf after editing it.
 
 ## Keep

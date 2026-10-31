@@ -35,7 +35,11 @@ async function refresh() {
 
 function render() {
   const q = filterEl.value.trim().toLowerCase();
-  visible = tiles.filter((t) => !q || t.name.toLowerCase().includes(q));
+  // The qualifier is filterable too: typing the parent folder is how you
+  // pick between two vaults of the same name.
+  visible = tiles.filter(
+    (t) => !q || `${t.name} ${t.qualifier || ""}`.toLowerCase().includes(q),
+  );
 
   if (pending) {
     keepbarEl.innerHTML =
@@ -73,16 +77,18 @@ function render() {
       tile.innerHTML =
         `<span class="badge">${idx <= 9 ? idx : ""}</span>` +
         `<span class="dot"></span>` +
-        `<span class="name">${esc(t.name)}</span>` +
+        `<span class="label"><span class="name">${esc(t.name)}</span>` +
+        (t.qualifier ? `<span class="qual">${esc(t.qualifier)}</span>` : "") +
+        `</span>` +
         (t.open ? `<span class="close" title="close vault (frees its RAM)">×</span>` : "");
       tile.addEventListener("click", (e) => {
         if (e.target.classList.contains("close")) {
           e.stopPropagation();
-          invoke("close_vault", { name: t.name });
+          invoke("close_vault", { id: t.id });
           setTimeout(refresh, 700); // give the window a moment to die
           return;
         }
-        pick(t.name);
+        pick(t);
       });
       grid.appendChild(tile);
     }
@@ -98,14 +104,17 @@ function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
-// A tile: launch the vault, or in keep mode file the capture into it.
-function pick(name) {
+// A tile: launch the vault, or in keep mode file the capture into it. A
+// board tile travels by Obsidian's vault id, since two vaults can share a
+// name and a label may carry a qualifier no vault answers to; a keep tile is
+// a folder under the exocortex root and travels by name.
+function pick(t) {
   filterEl.value = "";
   if (pending) {
     pending = null;
-    invoke("keep_file", { vault: name });
+    invoke("keep_file", { vault: t.name });
   } else {
-    invoke("launch", { name });
+    invoke("launch", { id: t.id });
   }
 }
 
@@ -130,7 +139,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (e.key === "Enter" && visible.length > 0) {
-    pick(visible[0].name);
+    pick(visible[0]);
     return;
   }
   // Digits are quick picks while the filter is empty; once the user has
@@ -138,7 +147,7 @@ document.addEventListener("keydown", (e) => {
   if (/^[1-9]$/.test(e.key) && filterEl.value === "") {
     e.preventDefault();
     const i = parseInt(e.key, 10) - 1;
-    if (visible[i]) pick(visible[i].name);
+    if (visible[i]) pick(visible[i]);
     return;
   }
   // Anything printable focuses the filter so you can just start typing.
