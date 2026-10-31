@@ -97,7 +97,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             hotkey: default_hotkey().into(),
-            quick_launch: String::new(),
+            quick_launch: default_quick_launch().into(),
             keep: "alt+k".into(),
             exocortex: keep::DEFAULT_REGISTRY.into(),
             vault_map: default_vault_map(),
@@ -117,6 +117,17 @@ fn default_hotkey() -> &'static str {
         "ctrl+alt+grave"
     } else {
         "alt+grave"
+    }
+}
+
+/// Quick launch is off by default, except on Linux, where it takes Ctrl+Alt+1:
+/// bound by nothing in GNOME, while Alt+1 is GNOME Terminal's first tab.
+/// `alt+1`, the Windows choice, stays a choice in the config.
+fn default_quick_launch() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "ctrl+alt+1"
+    } else {
+        ""
     }
 }
 
@@ -2319,6 +2330,17 @@ mod tests {
         assert_eq!(parse_cli(&args(&["--capabilities"])), Ok(Cli::Capabilities));
         assert!(parse_cli(&args(&["--toggle", "--quit"])).is_err());
         assert!(parse_cli(&args(&["obsidian://open?vault=x; rm -rf ~"])).is_err());
+    }
+
+    /// The Linux defaults take chords GNOME leaves free (the GNOME and GNOME
+    /// Terminal keybindings were read on P41 on 4 October 2026).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_defaults_take_chords_gnome_leaves_free() {
+        let c = Config::default();
+        assert_eq!((c.hotkey.as_str(), c.quick_launch.as_str(), c.keep.as_str()), ("ctrl+alt+grave", "ctrl+alt+1", "alt+k"));
+        assert_eq!(c.vault_map, ["exo", "vaults", "--json"]);
+        assert_eq!(c.exocortex, "/opt/labos/current/kernel/instance/exocortex.toml");
     }
 
     fn vault(id: &str, path: &str, open: bool) -> Vault {

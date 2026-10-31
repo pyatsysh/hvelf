@@ -133,7 +133,9 @@ first run:
   alone.
 - On Linux the defaults differ: `hotkey` is `ctrl+alt+grave`, since GNOME
   binds Alt and the key above Tab to switching an application's windows
-  (`alt+grave` still works once that binding is freed); `vaultMap` is
+  (`alt+grave` still works once that binding is freed); `quickLaunch` is
+  `ctrl+alt+1`, since GNOME Terminal takes `alt+1` for its first tab (set
+  `alt+1` to take it from the terminal); `vaultMap` is
   `["exo", "vaults", "--json"]`; `exocortex` is Lab-OS's
   `/opt/labos/current/kernel/instance/exocortex.toml`.
 - Entries in `hide`, `groups` and `deepLinks` name a vault by its name, or by
