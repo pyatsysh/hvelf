@@ -135,7 +135,7 @@ The capture half of a personal exocortex: the text under your mouse goes
 into a vault without a model, a dialog, or a round trip through Obsidian.
 
 Highlight text anywhere (browser, PDF reader, terminal, Word, Obsidian) and
-press the `keep` chord. hvelf reads the selection through UI Automation,
+press the `keep` chord. On Windows hvelf reads the selection through UI Automation,
 which costs no clipboard and no injected keys, and falls back to a
 clipboard round trip (Ctrl+C, read, restore) for apps that do not expose
 their selection. Terminals never get the fallback, because Ctrl+C with
@@ -150,6 +150,16 @@ it in the fallback vault's `keeps/unrouted/` to decide later. A capture is
 never discarded: losing the board also parks it. Focus returns to the app
 you were in and a toast confirms `kept → vault`.
 
+On Linux (an X11 session) hvelf reads the PRIMARY selection, the text last
+highlighted on the display, from the program holding it, as any X client
+pastes it: no keys are sent and the clipboard is not touched, so terminals
+work too. The keep is credited to the window in front; text highlighted in
+another program is refused rather than credited to the wrong one. Browser
+addresses are not captured on Linux. `hvelf --keep` does what the chord
+does, for a desktop shortcut. Wayland gives no application another one's
+selection, so there capture is unsupported and `hvelf --capabilities` says
+so.
+
 Vaults are the subfolders of a root named in a small registry file:
 
 ```toml
@@ -158,9 +168,14 @@ root = "/mnt/d/Dropbox/Vaults/Operational/research"
 fallback = "exo"
 ```
 
-WSL paths are translated (`/mnt/d/...` to `D:\...`). With no registry the
-root defaults to `D:\Dropbox\Vaults\Operational\research` and the fallback
-to `exo`. Each note lands at `<root>/<vault>/keeps/<YYYY-MM>/<id>.md` with a
+On Windows WSL paths are translated (`/mnt/d/...` to `D:\...`), and with no
+registry the root defaults to `D:\Dropbox\Vaults\Operational\research` and
+the fallback to `exo`. Elsewhere the registry defaults to Lab-OS's own
+`/opt/labos/current/kernel/instance/exocortex.toml`, the file the `keep`
+command reads, and the root is used as written. Links to folders at the root
+count as vaults; `excluded` vaults are never offered. A keep is only written
+into a vault folder that exists: with no usable root or fallback vault the
+chord says so and takes nothing. Each note lands at `<root>/<vault>/keeps/<YYYY-MM>/<id>.md` with a
 YAML frontmatter (`id`, `ts`, `source`, `vault`, `app`, `title`, optional
 `url`, `sha256` of the body) and the selected text below it, byte for byte.
 Files are written to a temp name and renamed, so a sync client never sees
@@ -200,7 +215,7 @@ through it. Closing on X11 is a request handled by Obsidian, never a process
 kill, and hvelf does not edit vault files.
 
 A running board takes commands from a second invocation over D-Bus:
-`hvelf --toggle`, `--show`, `--hide`, `--quick-launch` and `--quit`. Bind
+`hvelf --toggle`, `--show`, `--hide`, `--quick-launch`, `--keep` and `--quit`. Bind
 `hvelf --toggle` to a key in the desktop's own settings (GNOME: Settings,
 Keyboard, View and Customise Shortcuts, Custom Shortcuts; KDE: System
 Settings, Shortcuts, Add Command). GNOME binds Alt plus the key above Tab to

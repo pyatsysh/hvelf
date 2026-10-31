@@ -1,6 +1,7 @@
 // keep: file a captured selection as a markdown note in a vault's keeps
 // folder. Everything here is platform independent and unit tested; the
-// capture itself (UI Automation, clipboard) lives in capture.rs.
+// capture itself lives in capture.rs on Windows (UI Automation, clipboard)
+// and in linux.rs on Linux (the X11 PRIMARY selection).
 
 use std::fs;
 use std::io;
@@ -11,17 +12,29 @@ use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------- registry
 
-/// Where the vaults live, read from exocortex.toml. The file is written on
-/// the WSL side with WSL paths, so `root` is translated for the host.
+/// Where the vaults live, read from exocortex.toml. On Windows the file is
+/// written on the WSL side with WSL paths, so `root` is translated for the
+/// host; elsewhere it is used as written.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Exocortex {
     pub root: PathBuf,
     pub fallback: String,
+    /// Vaults the exocortex never takes; the native `keep` refuses them too.
+    pub excluded: Vec<String>,
 }
 
+#[cfg(windows)]
 pub const DEFAULT_ROOT: &str = r"D:\Dropbox\Vaults\Operational\research";
-pub const DEFAULT_FALLBACK: &str = "exo";
+#[cfg(windows)]
 pub const DEFAULT_REGISTRY: &str = r"D:\Dropbox\Vaults\Operational\registry\exocortex.toml";
+/// Elsewhere the registry is Lab-OS's instance file in the selected release,
+/// the one the native `keep` reads, and the root comes only from it: with
+/// none named, nothing is filed.
+#[cfg(not(windows))]
+pub const DEFAULT_ROOT: &str = "";
+#[cfg(not(windows))]
+pub const DEFAULT_REGISTRY: &str = "/opt/labos/current/kernel/instance/exocortex.toml";
+pub const DEFAULT_FALLBACK: &str = "exo";
 
 #[derive(Deserialize)]
 struct ExocortexFile {
@@ -35,6 +48,8 @@ struct ExocortexVaults {
     root: String,
     #[serde(default)]
     fallback: String,
+    #[serde(default)]
+    excluded: Vec<String>,
 }
 
 /// Parse exocortex.toml. Missing keys fall back to the defaults; a file
@@ -44,14 +59,14 @@ pub fn parse_exocortex(text: &str) -> Option<Exocortex> {
     let root = if f.vaults.root.is_empty() {
         PathBuf::from(DEFAULT_ROOT)
     } else {
-        wsl_to_native(&f.vaults.root)
+        host_path(&f.vaults.root)
     };
     let fallback = if f.vaults.fallback.is_empty() {
         DEFAULT_FALLBACK.to_string()
     } else {
         f.vaults.fallback
     };
-    Some(Exocortex { root, fallback })
+    Some(Exocortex { root, fallback, excluded: f.vaults.excluded })
 }
 
 pub fn load_exocortex(path: &Path) -> Exocortex {
@@ -72,7 +87,42 @@ impl Default for Exocortex {
         Exocortex {
             root: PathBuf::from(DEFAULT_ROOT),
             fallback: DEFAULT_FALLBACK.to_string(),
+            excluded: Vec::new(),
         }
+    }
+}
+
+impl Exocortex {
+    /// Why nothing can be filed here, if so. Asked before a capture is
+    /// taken, so a broken registry costs the user nothing: the selection is
+    /// still where it was.
+    pub fn unusable(&self) -> Option<String> {
+        if self.root.as_os_str().is_empty() {
+            return Some("no vault root is named (no exocortex.toml, or one without [vaults] root)".into());
+        }
+        if !self.root.is_dir() {
+            return Some(format!("the vault root {} does not exist", self.root.display()));
+        }
+        None
+    }
+
+    /// The vaults that take keeps: the folders under the root, less the
+    /// excluded ones.
+    pub fn vaults(&self) -> Vec<String> {
+        list_vaults(&self.root)
+            .into_iter()
+            .filter(|v| !self.excluded.contains(v))
+            .collect()
+    }
+}
+
+/// The registry's root as a path on this host: translated from WSL on
+/// Windows, as written everywhere else.
+fn host_path(p: &str) -> PathBuf {
+    if cfg!(windows) {
+        wsl_to_native(p)
+    } else {
+        PathBuf::from(p)
     }
 }
 
@@ -95,12 +145,14 @@ pub fn wsl_to_native(p: &str) -> PathBuf {
     PathBuf::from(p)
 }
 
-/// The vaults are the subfolders of the root, dotfiles excluded.
+/// The vaults are the subfolders of the root, dotfiles excluded. A link to a
+/// folder counts as one: native Lab-OS keeps vault aliases at the root as
+/// symbolic links.
 pub fn list_vaults(root: &Path) -> Vec<String> {
     let mut v: Vec<String> = match fs::read_dir(root) {
         Ok(rd) => rd
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter(|e| fs::metadata(e.path()).map(|m| m.is_dir()).unwrap_or(false))
             .filter_map(|e| e.file_name().into_string().ok())
             .filter(|n| !n.starts_with('.'))
             .collect(),
@@ -180,8 +232,8 @@ pub fn render(meta: &Meta, body: &str) -> Vec<u8> {
     out.push_str(&format!("id: {}\n", meta.id));
     out.push_str(&format!("ts: {}\n", meta.ts));
     out.push_str("source: selection\n");
-    out.push_str(&format!("vault: {}\n", meta.vault));
-    out.push_str(&format!("app: {}\n", meta.app));
+    out.push_str(&format!("vault: {}\n", scalar(&meta.vault)));
+    out.push_str(&format!("app: {}\n", scalar(&meta.app)));
     out.push_str(&format!("title: {}\n", json_escape(&meta.title)));
     if let Some(u) = &meta.url {
         out.push_str(&format!("url: {}\n", json_escape(u)));
@@ -191,6 +243,16 @@ pub fn render(meta: &Meta, body: &str) -> Vec<u8> {
     let mut bytes = out.into_bytes();
     bytes.extend_from_slice(&b);
     bytes
+}
+
+/// A frontmatter value: bare when it is a plain token, as the native `keep`
+/// writes it, else a JSON string literal, which YAML reads the same way.
+fn scalar(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "_./:+-".contains(c)) {
+        s.to_string()
+    } else {
+        json_escape(s)
+    }
 }
 
 fn hex(d: &[u8]) -> String {
@@ -205,6 +267,20 @@ pub fn keep_path(root: &Path, vault: &str, month: &str, id: &str) -> PathBuf {
 /// <root>/<fallback>/keeps/unrouted/<id>.md
 pub fn unrouted_path(root: &Path, fallback: &str, id: &str) -> PathBuf {
     root.join(fallback).join("keeps").join("unrouted").join(format!("{id}.md"))
+}
+
+/// Write a keep under `<root>/<vault>/` only when that vault's folder is
+/// there. A capture never creates a vault: a vanished or misnamed one fails
+/// loudly, as the native `keep` refuses a vault that does not exist.
+pub fn write_in_vault(root: &Path, vault: &str, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    if vault.is_empty() || vault == "." || vault == ".." || vault.contains(['/', '\\']) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{vault:?} is not a vault name")));
+    }
+    let dir = root.join(vault);
+    if !dir.is_dir() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, format!("no vault folder at {}", dir.display())));
+    }
+    write_atomic(path, bytes)
 }
 
 /// Write via a sibling temp file and rename, so a sync client never sees
@@ -276,8 +352,15 @@ dir = "/home/py/.local/state/exo"
 threshold = 0.45
 "#;
         let e = parse_exocortex(text).unwrap();
+        #[cfg(windows)]
         assert_eq!(e.root, PathBuf::from(r"D:\Dropbox\Vaults\Operational\research"));
+        #[cfg(not(windows))]
+        assert_eq!(e.root, PathBuf::from("/mnt/d/Dropbox/Vaults/Operational/research"));
         assert_eq!(e.fallback, "exo");
+        assert!(e.excluded.is_empty());
+
+        let e = parse_exocortex("[vaults]\nroot = \"/v\"\nexcluded = [\"archive\"]\n").unwrap();
+        assert_eq!(e.excluded, ["archive"]);
 
         let e = parse_exocortex("[index]\ndir = \"x\"\n").unwrap();
         assert_eq!(e, Exocortex::default());
@@ -335,6 +418,23 @@ hello world\n";
     }
 
     #[test]
+    fn odd_names_are_quoted_plain_ones_bare() {
+        let meta = Meta {
+            id: "i".into(),
+            ts: "t".into(),
+            vault: "Lab notes".into(),
+            app: "pid 7: x".into(),
+            title: "".into(),
+            url: None,
+        };
+        let s = String::from_utf8(render(&meta, "x")).unwrap();
+        assert!(s.contains("\nvault: \"Lab notes\"\n"), "{s}");
+        assert!(s.contains("\napp: \"pid 7: x\"\n"), "{s}");
+        assert_eq!(scalar("gnome-terminal-server"), "gnome-terminal-server");
+        assert_eq!(scalar(""), "\"\"");
+    }
+
+    #[test]
     fn body_verbatim_with_one_trailing_newline() {
         let meta = Meta {
             id: "i".into(),
@@ -375,6 +475,59 @@ hello world\n";
         assert_eq!(fs::read(&p).unwrap(), b"body\n");
         assert!(!dir.join("a").join("b.md.tmp").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("hvelf-keep-{tag}-{} é", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_vaults_count_and_excluded_ones_do_not() {
+        let root = scratch("list");
+        let elsewhere = scratch("list-target");
+        fs::create_dir_all(root.join("exo")).unwrap();
+        fs::create_dir_all(root.join("archive")).unwrap();
+        fs::create_dir_all(root.join(".obsidian")).unwrap();
+        fs::write(root.join("notes.md"), "x").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, root.join("AL")).unwrap();
+        std::os::unix::fs::symlink(root.join("gone"), root.join("dangling")).unwrap();
+        assert_eq!(list_vaults(&root), ["AL", "archive", "exo"]);
+        let exo = Exocortex { root: root.clone(), fallback: "exo".into(), excluded: vec!["archive".into()] };
+        assert_eq!(exo.vaults(), ["AL", "exo"]);
+        assert_eq!(exo.unusable(), None);
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&elsewhere);
+    }
+
+    #[test]
+    fn an_unusable_registry_says_why() {
+        let none = Exocortex { root: PathBuf::new(), fallback: "exo".into(), excluded: vec![] };
+        assert!(none.unusable().unwrap().contains("no vault root"));
+        let gone = Exocortex { root: scratch("gone").join("not-there"), ..none.clone() };
+        assert!(gone.unusable().unwrap().contains("does not exist"));
+        #[cfg(not(windows))]
+        assert_eq!(Exocortex::default().unusable(), none.unusable());
+    }
+
+    #[test]
+    fn a_capture_never_creates_a_vault() {
+        let root = scratch("write");
+        fs::create_dir_all(root.join("AL")).unwrap();
+        let into = |v: &str| keep_path(&root, v, "2026-10", "id1");
+        write_in_vault(&root, "AL", &into("AL"), b"body\n").unwrap();
+        assert_eq!(fs::read(into("AL")).unwrap(), b"body\n");
+        let e = write_in_vault(&root, "Nope", &into("Nope"), b"x").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        assert!(!root.join("Nope").exists());
+        for bad in ["", ".", "..", "a/b", "a\\b"] {
+            let e = write_in_vault(&root, bad, &root.join("x.md"), b"x").unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

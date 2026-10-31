@@ -298,10 +298,13 @@ pub fn portal_global_shortcuts() -> Result<u32, String> {
 // ------------------------------------------------------------------ X11
 
 pub mod x11 {
+    use std::time::{Duration, Instant};
+
     use x11rb::connection::Connection;
     use x11rb::errors::ReplyError;
     use x11rb::protocol::xproto::{
-        AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, GrabMode, Keycode, ModMask, Window,
+        AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask, GrabMode, Keycode, ModMask,
+        Property, Window, WindowClass,
     };
     use x11rb::protocol::{ErrorKind, Event};
     use x11rb::rust_connection::RustConnection;
@@ -319,6 +322,7 @@ pub mod x11 {
         supported: u32,
         net_wm_name: u32,
         utf8: u32,
+        wm_pid: u32,
     }
 
     impl Ewmh {
@@ -334,7 +338,8 @@ pub mod x11 {
             let supported = atom(b"_NET_SUPPORTED")?;
             let net_wm_name = atom(b"_NET_WM_NAME")?;
             let utf8 = atom(b"UTF8_STRING")?;
-            Ok(Ewmh { conn, root, client_list, active, close, supported, net_wm_name, utf8 })
+            let wm_pid = atom(b"_NET_WM_PID")?;
+            Ok(Ewmh { conn, root, client_list, active, close, supported, net_wm_name, utf8, wm_pid })
         }
 
         fn windows_prop(&self, w: Window, prop: u32) -> Result<Option<Vec<u32>>, String> {
@@ -422,6 +427,159 @@ pub mod x11 {
         /// is killed.
         pub fn request_close(&self, w: Window) -> Result<(), String> {
             self.ask_wm(w, self.close, [0, 2, 0, 0, 0])
+        }
+
+        /// The process behind `w`: asked of the X server, which knows without
+        /// taking the client's word, else the client's own `_NET_WM_PID`.
+        /// None for a remote client that says nothing.
+        pub fn pid_of(&self, w: Window) -> Option<u32> {
+            client_pid(&self.conn, w).or_else(|| {
+                let r = self.conn.get_property(false, w, self.wm_pid, AtomEnum::CARDINAL, 0, 1).ok()?.reply().ok()?;
+                let pid = r.value32()?.next();
+                pid
+            })
+        }
+
+        /// The window in front, which a capture is credited to and which gets
+        /// the focus back once it is filed.
+        pub fn front(&self) -> Result<Front, String> {
+            let window = self
+                .active_window()
+                .ok_or_else(|| "no window is in front (the window manager publishes no _NET_ACTIVE_WINDOW)".to_string())?;
+            Ok(Front { window, pid: self.pid_of(window), title: self.title(window).unwrap_or_default() })
+        }
+    }
+
+    // ----------------------------------------------------------- capture
+
+    /// The window in front when the keep chord was pressed.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Front {
+        pub window: Window,
+        pub pid: Option<u32>,
+        pub title: String,
+    }
+
+    /// The local process that created `w`, from the X-Resource extension.
+    pub fn client_pid(conn: &impl Connection, w: Window) -> Option<u32> {
+        use x11rb::protocol::res::{ClientIdMask, ClientIdSpec, ConnectionExt as _};
+        let spec = ClientIdSpec { client: w, mask: ClientIdMask::LOCAL_CLIENT_PID };
+        let reply = conn.res_query_client_ids(&[spec]).ok()?.reply().ok()?;
+        reply
+            .ids
+            .into_iter()
+            .find(|id| id.spec.mask == ClientIdMask::LOCAL_CLIENT_PID)
+            .and_then(|id| id.value.first().copied())
+    }
+
+    /// The PRIMARY selection: the text last highlighted on this display, and
+    /// the process holding it.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Selection {
+        pub text: String,
+        pub owner_pid: Option<u32>,
+    }
+
+    /// Read PRIMARY from its owner the way any X client pastes it, so no key
+    /// is injected and the clipboard is left alone. `Ok(None)` when nothing
+    /// holds a selection. Bounded by `timeout`: the owner is another program,
+    /// and it may be busy or gone.
+    pub fn read_primary(display: Option<&str>, timeout: Duration) -> Result<Option<Selection>, String> {
+        let (conn, screen) = x11rb::connect(display).map_err(|x| format!("cannot connect to the X display: {x}"))?;
+        let root = conn.setup().roots[screen].root;
+        let owner = conn.get_selection_owner(AtomEnum::PRIMARY.into()).map_err(e)?.reply().map_err(e)?.owner;
+        if owner == x11rb::NONE {
+            return Ok(None);
+        }
+        let atom = |name: &[u8]| -> Result<u32, String> {
+            Ok(conn.intern_atom(false, name).map_err(e)?.reply().map_err(e)?.atom)
+        };
+        let (utf8, incr, prop) = (atom(b"UTF8_STRING")?, atom(b"INCR")?, atom(b"HVELF_SELECTION")?);
+        let win = conn.generate_id().map_err(e)?;
+        conn.create_window(
+            x11rb::COPY_DEPTH_FROM_PARENT,
+            win,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_ONLY,
+            x11rb::COPY_FROM_PARENT,
+            &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+        )
+        .map_err(e)?;
+        let deadline = Instant::now() + timeout;
+        let text = (|| -> Result<Option<String>, String> {
+            for target in [utf8, u32::from(AtomEnum::STRING)] {
+                conn.convert_selection(win, AtomEnum::PRIMARY.into(), target, prop, x11rb::CURRENT_TIME)
+                    .map_err(e)?;
+                conn.flush().map_err(e)?;
+                let notify = loop {
+                    if let Event::SelectionNotify(n) = next_event(&conn, deadline)? {
+                        if n.requestor == win {
+                            break n;
+                        }
+                    }
+                };
+                if notify.property == x11rb::NONE {
+                    continue; // not offered as this target; try the next
+                }
+                let bytes = take_property(&conn, win, prop, incr, deadline)?;
+                let text = if target == utf8 {
+                    String::from_utf8_lossy(&bytes).into_owned()
+                } else {
+                    bytes.iter().map(|&b| b as char).collect() // STRING is Latin-1
+                };
+                return Ok(Some(text.trim_end_matches('\0').to_string()));
+            }
+            Ok(None)
+        })();
+        let _ = conn.destroy_window(win);
+        let _ = conn.flush();
+        match text? {
+            Some(text) => Ok(Some(Selection { text, owner_pid: client_pid(&conn, owner) })),
+            None => Err("the selection is not text".into()),
+        }
+    }
+
+    fn next_event(conn: &RustConnection, deadline: Instant) -> Result<Event, String> {
+        loop {
+            if let Some(ev) = conn.poll_for_event().map_err(e)? {
+                return Ok(ev);
+            }
+            if Instant::now() >= deadline {
+                return Err("the program holding the selection did not hand it over in time".into());
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// The converted selection, read off our window and deleted. A large one
+    /// comes INCR: a size first, then chunks, each announced by a property
+    /// change and taken by deleting it, until an empty chunk ends it.
+    fn take_property(conn: &RustConnection, win: Window, prop: u32, incr: u32, deadline: Instant) -> Result<Vec<u8>, String> {
+        let get = || -> Result<x11rb::protocol::xproto::GetPropertyReply, String> {
+            let r = conn.get_property(true, win, prop, AtomEnum::ANY, 0, u32::MAX / 4).map_err(e)?.reply().map_err(e)?;
+            conn.flush().map_err(e)?;
+            Ok(r)
+        };
+        let first = get()?;
+        if first.type_ != incr {
+            return Ok(first.value);
+        }
+        let mut out = Vec::new();
+        loop {
+            if let Event::PropertyNotify(p) = next_event(conn, deadline)? {
+                if p.window == win && p.atom == prop && p.state == Property::NEW_VALUE {
+                    let chunk = get()?;
+                    if chunk.value.is_empty() {
+                        return Ok(out);
+                    }
+                    out.extend_from_slice(&chunk.value);
+                }
+            }
         }
     }
 
@@ -551,6 +709,63 @@ pub mod x11 {
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ keep
+
+/// What the keep chord found on X11.
+pub struct Grabbed {
+    pub text: String,
+    /// The program in front, by executable name, e.g. `firefox`.
+    pub app: String,
+    pub title: String,
+    pub window: u32,
+}
+
+pub enum Grab {
+    Text(Grabbed),
+    /// The board itself is in front: the chord just puts it away.
+    Own,
+}
+
+/// The highlighted text for a keep, credited to the window in front. X11's
+/// PRIMARY holds the last text highlighted anywhere on the display, which
+/// need not be in the window in front; then nothing is taken, since a keep
+/// records which program it came from and that would be another one.
+pub fn grab_selection(own_pid: u32, timeout: Duration) -> Result<Grab, String> {
+    match session() {
+        Session::X11 => {}
+        Session::Wayland => {
+            return Err("capture needs an X11 session; Wayland gives no application another one's selection".into())
+        }
+        Session::Headless => return Err("no graphical session".into()),
+    }
+    let front = x11::Ewmh::connect(None)?.front()?;
+    if front.pid == Some(own_pid) {
+        return Ok(Grab::Own);
+    }
+    let sel = x11::read_primary(None, timeout)?.ok_or("nothing selected")?;
+    let app = front.pid.map(exe_name).unwrap_or_else(|| "unknown".into());
+    if let (Some(a), Some(b)) = (front.pid, sel.owner_pid) {
+        if a != b {
+            return Err(format!("the highlighted text is in {}, not in {app}; select it again", exe_name(b)));
+        }
+    }
+    if sel.text.is_empty() {
+        return Err("nothing selected".into());
+    }
+    Ok(Grab::Text(Grabbed { text: sel.text, app, title: front.title, window: front.window }))
+}
+
+/// A process's executable name from /proc, or its command name when the
+/// executable cannot be read.
+pub fn exe_name(pid: u32) -> String {
+    std::fs::read_link(format!("/proc/{pid}/exe"))
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().trim_end_matches(" (deleted)").to_string()))
+        .or_else(|| std::fs::read_to_string(format!("/proc/{pid}/comm")).ok().map(|s| s.trim().to_string()))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| format!("pid {pid}"))
 }
 
 // ---------------------------------------------------------- capabilities

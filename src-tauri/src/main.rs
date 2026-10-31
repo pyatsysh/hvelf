@@ -199,6 +199,16 @@ fn load_or_seed_config() -> Config {
     Config::default()
 }
 
+/// The config as it stands, without seeding a file: for probes that must not
+/// write.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn read_config() -> Config {
+    fs::read_to_string(config_file())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
 /// Change `hide` in config.json. The file is edited as the JSON it is rather
 /// than written back from Config, so the user's key order survives, and so
 /// does any key this build does not know.
@@ -941,11 +951,15 @@ fn launch_or_tell(app: &AppHandle, cfg: &Config, id: &str) {
 }
 
 #[tauri::command]
-fn capabilities(runtime: State<RuntimeCaps>) -> Vec<Capability> {
+#[allow(unused_variables)]
+fn capabilities(runtime: State<RuntimeCaps>, cfg: State<SharedConfig>) -> Vec<Capability> {
     #[allow(unused_mut)]
     let mut out: Vec<Capability> = Vec::new();
     #[cfg(target_os = "linux")]
-    out.extend(linux::capabilities());
+    {
+        out.extend(linux::capabilities());
+        out.push(keep_capability(&cfg.get()));
+    }
     out.extend(runtime.0.lock().unwrap().iter().cloned());
     out
 }
@@ -956,7 +970,9 @@ fn capabilities(runtime: State<RuntimeCaps>) -> Vec<Capability> {
 // and files it verbatim as a note under <vault>/keeps/. The board then
 // opens in keep mode to ask which vault: Enter or the chord again takes
 // the preselected one, a tile key picks another, Esc parks the note in the
-// fallback vault's unrouted folder. A capture is never dropped.
+// fallback vault's unrouted folder. A capture is never dropped. On Linux the
+// selection is X11's PRIMARY, read in linux.rs; on Windows UI Automation or
+// the clipboard, in capture.rs.
 
 /// A capture waiting on the board for a vault.
 struct Pending {
@@ -978,6 +994,22 @@ struct Pending {
 
 #[derive(Clone, Default)]
 struct KeepState(Arc<Mutex<Option<Pending>>>);
+
+/// One capture at a time: the chord and `hvelf --keep` run on different
+/// threads, and a second capture must see the first one's pending note.
+static KEEP_TURN: Mutex<()> = Mutex::new(());
+
+/// What a capture found, before the board asks where it goes.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+struct Captured {
+    body: String,
+    /// The program it came from, by executable name.
+    app: String,
+    title: String,
+    url: Option<String>,
+    /// Window to give the focus back to once the note is filed.
+    source: isize,
+}
 
 enum Route {
     Preselected,
@@ -1062,11 +1094,12 @@ fn file_pending(app: &AppHandle, keep: &KeepState, route: Route, restore_focus: 
     };
     let bytes = keep::render(&meta, &p.body);
     let mut label = chosen.clone().unwrap_or_else(|| "unrouted".into());
-    if let Err(e) = keep::write_atomic(&path, &bytes) {
+    let into = chosen.as_deref().unwrap_or(&p.exo.fallback);
+    if let Err(e) = keep::write_in_vault(&p.exo.root, into, &path, &bytes) {
         eprintln!("hvelf: keep write failed at {}: {e}", path.display());
         // Never drop a capture: the unrouted folder is the last resort, and
         // if even that fails the toast says so and the text is in stderr.
-        if chosen.is_some() && keep::write_atomic(&unrouted, &bytes).is_ok() {
+        if chosen.is_some() && keep::write_in_vault(&p.exo.root, &p.exo.fallback, &unrouted, &bytes).is_ok() {
             label = format!("unrouted, {} refused: {e}", chosen.clone().unwrap());
         } else {
             eprintln!("hvelf: keep lost, body follows\n{}", p.body);
@@ -1092,7 +1125,7 @@ fn file_pending(app: &AppHandle, keep: &KeepState, route: Route, restore_focus: 
 
 /// Vaults as tiles: the preselected one first, then the rest in the
 /// board's own recency order, then any the board does not know about.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn order_for_board(vaults: &[String], pre: &str, cfg: &Config, hist: &FocusHistory) -> Vec<String> {
     let all = registered_vaults();
     let mut ranked: Vec<(String, u64)> = all
@@ -1115,7 +1148,7 @@ fn order_for_board(vaults: &[String], pre: &str, cfg: &Config, hist: &FocusHisto
     out
 }
 
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn rand32() -> u32 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
@@ -1132,6 +1165,7 @@ fn rand32() -> u32 {
 /// The chord. Runs on the hotkey thread, which holds the COM apartment.
 #[cfg(windows)]
 fn start_keep(app: &AppHandle, cfg: &Config, hist: &FocusHistory, keep: &KeepState) {
+    let _turn = KEEP_TURN.lock().unwrap_or_else(|e| e.into_inner());
     // Chord again while a capture waits on the board: file it where the
     // banner says.
     if keep.0.lock().unwrap().is_some() {
@@ -1164,33 +1198,144 @@ fn start_keep(app: &AppHandle, cfg: &Config, hist: &FocusHistory, keep: &KeepSta
         None
     };
     let exo = keep::load_exocortex(Path::new(&cfg.exocortex));
-    let vaults = keep::list_vaults(&exo.root);
+    if let Some(why) = keep_blocker(&exo) {
+        toast(app, &format!("keep: {why}; registry {}", cfg.exocortex));
+        return;
+    }
+    let c = Captured { body, app: src.exe.clone(), title: src.title.clone(), url, source: src.hwnd };
+    queue_keep(app, cfg, hist, keep, exo, now, c);
+}
+
+/// The chord on Linux, run off the main thread: reading the selection is a
+/// round trip through the program holding it, which may be the board
+/// itself. The registry is checked first, so a broken one takes nothing:
+/// reading PRIMARY leaves the selection where it was anyway.
+#[cfg(target_os = "linux")]
+fn start_keep(app: &AppHandle, cfg: &Config, hist: &FocusHistory, keep: &KeepState) {
+    let _turn = KEEP_TURN.lock().unwrap_or_else(|e| e.into_inner());
+    // Chord again while a capture waits on the board: file it where the
+    // banner says.
+    if keep.0.lock().unwrap().is_some() {
+        file_pending(app, keep, Route::Preselected, true);
+        return;
+    }
+    let exo = keep::load_exocortex(Path::new(&cfg.exocortex));
+    if let Some(why) = keep_blocker(&exo) {
+        toast(app, &format!("keep: {why}; registry {}", cfg.exocortex));
+        return;
+    }
+    let now = chrono::Local::now();
+    match linux::grab_selection(std::process::id(), std::time::Duration::from_millis(1500)) {
+        Ok(linux::Grab::Own) => hide_window(app.clone()),
+        Ok(linux::Grab::Text(g)) => {
+            let c = Captured { body: g.text, app: g.app, title: g.title, url: None, source: g.window as isize };
+            queue_keep(app, cfg, hist, keep, exo, now, c);
+        }
+        Err(why) => toast(app, &format!("keep: {why}")),
+    }
+}
+
+/// Why a capture cannot be filed: no usable root, or no fallback vault to
+/// park it in, which is what keeps a capture from ever being dropped.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn keep_blocker(exo: &keep::Exocortex) -> Option<String> {
+    exo.unusable().or_else(|| {
+        (!exo.root.join(&exo.fallback).is_dir())
+            .then(|| format!("the fallback vault {} is not under {}", exo.fallback, exo.root.display()))
+    })
+}
+
+/// Put a capture on the board in keep mode, with the vault it will go to
+/// lit: the one named in the window title, else the last one kept into,
+/// else the fallback.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn queue_keep(
+    app: &AppHandle,
+    cfg: &Config,
+    hist: &FocusHistory,
+    keep: &KeepState,
+    exo: keep::Exocortex,
+    now: chrono::DateTime<chrono::Local>,
+    c: Captured,
+) {
+    let vaults = exo.vaults();
     if vaults.is_empty() {
         eprintln!("hvelf: no vaults under {}", exo.root.display());
     }
     let last = load_persisted().last_keep_vault;
-    let pre = keep::preselect(&src.title, &vaults)
+    let pre = keep::preselect(&c.title, &vaults)
         .or_else(|| vaults.contains(&last).then(|| last.clone()))
         .unwrap_or_else(|| exo.fallback.clone());
     let ordered = order_for_board(&vaults, &pre, cfg, hist);
+    // Names and a count only: the text itself never goes to a log.
+    eprintln!(
+        "hvelf: keep: {} chars from {} are waiting on the board; {pre} is lit; vaults {}",
+        c.body.chars().count(),
+        c.app,
+        ordered.join(", ")
+    );
     let pending = Pending {
-        body,
+        body: c.body,
         id: keep::new_id(&now.format("%Y%m%dT%H%M%S").to_string(), rand32()),
         ts: now.format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
         month: now.format("%Y-%m").to_string(),
-        app: src.exe.clone(),
-        title: src.title.clone(),
-        url,
+        app: c.app,
+        title: c.title,
+        url: c.url,
         vault: pre,
         vaults: ordered,
         exo,
-        source: src.hwnd,
+        source: c.source,
     };
     *keep.0.lock().unwrap() = Some(pending);
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.show();
         let _ = w.set_focus();
         let _ = w.emit("keep", ());
+    }
+}
+
+/// `hvelf --keep`: the chord's work, for a desktop shortcut where no chord
+/// can be grabbed. Off the calling thread, since it waits on other programs.
+fn keep_from_command(app: &AppHandle) {
+    #[cfg(any(windows, target_os = "linux"))]
+    {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            #[cfg(windows)]
+            capture::init_com();
+            let cfg = app.state::<SharedConfig>().get();
+            let hist = app.state::<FocusHistory>().inner().clone();
+            let keep = app.state::<KeepState>().inner().clone();
+            start_keep(&app, &cfg, &hist, &keep);
+        });
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
+    toast(app, "keep: capture is not available on this platform");
+}
+
+/// Whether the keep chord can capture in this session, for
+/// `hvelf --capabilities` and the limits under the board.
+#[cfg(target_os = "linux")]
+fn keep_capability(cfg: &Config) -> Capability {
+    let source = cfg.exocortex.clone();
+    match linux::session() {
+        linux::Session::Wayland => linux::cap(
+            "keep-capture",
+            "unsupported",
+            "capture reads X11's PRIMARY selection; a Wayland desktop gives no application another one's selection",
+            source,
+        ),
+        linux::Session::Headless => linux::cap("keep-capture", "unavailable", "no graphical session", source),
+        linux::Session::X11 => match keep_blocker(&keep::load_exocortex(Path::new(&cfg.exocortex))) {
+            Some(why) => linux::cap("keep-capture", "unavailable", format!("{why}; point exocortex in config.json at the registry"), source),
+            None => linux::cap(
+                "keep-capture",
+                "available",
+                "the text highlighted in the window in front (X11 PRIMARY), filed under <root>/<vault>/keeps/; browser addresses are not captured on Linux",
+                source,
+            ),
+        },
     }
 }
 
@@ -1407,7 +1552,7 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
         };
         let mut chords = Vec::new();
         let mut notes = Vec::new();
-        for (slot, spec) in [(1u8, boot.hotkey.clone()), (2u8, boot.quick_launch.clone())] {
+        for (slot, spec) in [(1u8, boot.hotkey.clone()), (2u8, boot.quick_launch.clone()), (3u8, boot.keep.clone())] {
             if spec.is_empty() {
                 continue;
             }
@@ -1442,12 +1587,16 @@ fn spawn_hotkeys(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
         });
 
         let specs: Vec<linux::x11::Chord> = chords.iter().map(|(_, c)| *c).collect();
+        let keep = app.state::<KeepState>().inner().clone();
         while let Some(i) = g.next_press(&specs) {
             match chords[i].0 {
                 1 => {
                     let app2 = app.clone();
                     let _ = app.run_on_main_thread(move || toggle_window(&app2));
                 }
+                // On this thread: the capture waits on the program holding
+                // the selection, and the main thread may be that program.
+                3 => start_keep(&app, &cfg.get(), &hist, &keep),
                 _ => {
                     let app2 = app.clone();
                     let cfg2 = cfg.clone();
@@ -1575,6 +1724,7 @@ enum Action {
     Show,
     Hide,
     QuickLaunch,
+    Keep,
     Quit,
 }
 
@@ -1586,7 +1736,7 @@ enum Cli {
     Help,
 }
 
-const USAGE: &str = "usage: hvelf [--toggle | --show | --hide | --quick-launch | --quit | --capabilities | --list-vaults | --help]";
+const USAGE: &str = "usage: hvelf [--toggle | --show | --hide | --quick-launch | --keep | --quit | --capabilities | --list-vaults | --help]";
 
 fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let mut out = Cli::Run(None);
@@ -1596,6 +1746,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
             "--show" => Cli::Run(Some(Action::Show)),
             "--hide" => Cli::Run(Some(Action::Hide)),
             "--quick-launch" => Cli::Run(Some(Action::QuickLaunch)),
+            "--keep" => Cli::Run(Some(Action::Keep)),
             "--quit" => Cli::Run(Some(Action::Quit)),
             "--capabilities" => Cli::Capabilities,
             "--list-vaults" => Cli::ListVaults,
@@ -1620,6 +1771,7 @@ fn perform(app: &AppHandle, action: Action) {
             }
         }
         Action::Hide => hide_window(app.clone()),
+        Action::Keep => keep_from_command(app),
         Action::Quit => app.exit(0),
         Action::QuickLaunch => {
             let cfg = app.state::<SharedConfig>().get();
@@ -1657,7 +1809,10 @@ fn main() {
             #[allow(unused_mut)]
             let mut caps: Vec<Capability> = Vec::new();
             #[cfg(target_os = "linux")]
-            caps.extend(linux::capabilities());
+            {
+                caps.extend(linux::capabilities());
+                caps.push(keep_capability(&read_config()));
+            }
             println!("{}", serde_json::to_string_pretty(&caps).unwrap());
             return;
         }
@@ -1716,7 +1871,9 @@ fn main() {
             }
             #[cfg(not(target_os = "linux"))]
             build_tray(app)?;
-            build_toast(app)?;
+            if let Err(e) = build_toast(app) {
+                eprintln!("hvelf: no toast window ({e}); keep messages go to stderr only");
+            }
             let cfg = app.state::<SharedConfig>().inner().clone();
             let hist = app.state::<FocusHistory>().inner().clone();
             spawn_hotkeys(app.handle().clone(), cfg, hist);
@@ -1768,6 +1925,7 @@ mod tests {
         assert_eq!(parse_cli(&args(&[])), Ok(Cli::Run(None)));
         assert_eq!(parse_cli(&args(&["--toggle"])), Ok(Cli::Run(Some(Action::Toggle))));
         assert_eq!(parse_cli(&args(&["--quick-launch"])), Ok(Cli::Run(Some(Action::QuickLaunch))));
+        assert_eq!(parse_cli(&args(&["--keep"])), Ok(Cli::Run(Some(Action::Keep))));
         assert_eq!(parse_cli(&args(&["--capabilities"])), Ok(Cli::Capabilities));
         assert!(parse_cli(&args(&["--toggle", "--quit"])).is_err());
         assert!(parse_cli(&args(&["obsidian://open?vault=x; rm -rf ~"])).is_err());
