@@ -30,8 +30,8 @@ open ones glowing.
 ## Features
 
 - **Summoned on a hotkey**: `` Alt+` `` by default toggles the board; `Esc` or
-  focus loss dismisses it. A tray icon gives a mouse path and a quit; there is
-  no taskbar clutter.
+  focus loss dismisses it. A tray icon gives a mouse path, the hidden vaults
+  and a quit; there is no taskbar clutter.
 - **Quick launch**: an optional second hotkey opens your most recent vault
   directly, skipping the board entirely.
 - **Keep**: highlight text in any app, press `Alt+K`, and it is filed
@@ -46,7 +46,8 @@ open ones glowing.
 - **Remove from the board**: on a vault that is not open, the same `×` takes
   its tile off the board, for vaults that have gone stale. The first click
   asks and the second removes. The vault's path goes into `hide` in the config
-  and Obsidian is left alone; deleting the entry brings the tile back.
+  and Obsidian is left alone. **Hidden vaults**, in the tray menu, lists
+  every vault taken off the board; click one and its tile comes back.
 - **Recency order**: tiles sort most-recently-used first, so `1` is always
   the vault you were last in. While hvelf runs it tracks which vault window
   you actually have focused, which beats Obsidian's own timestamps: those
@@ -103,7 +104,8 @@ sits silent until the hotkey.
   layouts. `quickLaunch` may be empty to disable it.
 - `groups` order the board. Vaults you do not list fall into a trailing group.
 - `hide` removes a vault's tile without touching Obsidian. The `×` on a tile
-  adds the vault here for you, by its path.
+  adds the vault here for you, by its path, and Hidden vaults in the tray
+  menu takes it out again.
 - `deepLinks` make a tile open a specific note, via `&file=` in the URI.
 - `keep` is the capture hotkey (default `alt+k`, empty to disable) and
   `exocortex` the registry it reads, see below.
@@ -111,7 +113,7 @@ sits silent until the hotkey.
   its full path, which is the only way to name one of two vaults that share a
   name (`"hide": ["D:\\delme\\moreland-dispute"]`).
 - The config is read at startup, so restart hvelf after editing it by hand. A
-  tile removed from the board is gone at once.
+  tile removed from the board, or put back from the tray, changes at once.
 
 ## Keep
 
