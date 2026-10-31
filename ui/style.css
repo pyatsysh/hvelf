@@ -175,7 +175,7 @@ section h2 {
   border-color: rgba(224, 108, 117, 0.55);
 }
 .tile.armed .close { color: #e06c75; }
-.tile.armed .name { color: #e8a0a6; }
+.tile.armed .name { color: #e8a0a6; text-decoration: none; }
 
 #hint {
   margin-top: 8px;

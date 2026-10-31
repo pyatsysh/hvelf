@@ -6,8 +6,10 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { background: transparent; height: 100%; overflow: hidden; user-select: none; }
+    /* A fixed height, not the window's: GTK makes the toast window taller
+       than asked on Linux, and the rest of it stays transparent. */
     #pill {
-      height: 100%;
+      height: 52px;
       display: flex;
       align-items: center;
       gap: 10px;

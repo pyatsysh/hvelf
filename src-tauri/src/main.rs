@@ -881,7 +881,11 @@ fn tiles(cfg: &Config, hist: &FocusHistory, all: Vec<Vault>, map: Option<&vaultm
             )
         })
         .collect();
-    ranked.sort_by_key(|(pos, eff, _)| (*pos, std::cmp::Reverse(*eff)));
+    // Within a group, what can be opened comes first, so `1` and Enter never
+    // land on a vault that is not there: then vaults Obsidian has not opened
+    // yet, then registry entries whose folder is gone.
+    let rank = |t: &VaultTile| if t.missing { 2 } else if !t.registered { 1 } else { 0 };
+    ranked.sort_by_key(|(pos, eff, t)| (*pos, rank(t), std::cmp::Reverse(*eff)));
     ranked.into_iter().map(|(_, _, t)| t).collect()
 }
 
@@ -2453,6 +2457,10 @@ mod tests {
         assert!(!lab.registered && !lab.missing);
         assert!(by("map:Learning").is_none(), "a vault of the map without .obsidian is no Obsidian vault");
         assert_eq!(t.len(), 4);
+        // What opens comes first, whatever the stamps say: the gone melt was
+        // used after Admin, yet it is last.
+        let order: Vec<&str> = t.iter().map(|x| x.id.as_str()).collect();
+        assert_eq!(order, ["bbbb", "cccc", "map:Lab-OS", "dddd"]);
 
         // Hiding the folder hides the link Obsidian lists apart, and a hidden
         // vault does not come back as one Obsidian does not know.
