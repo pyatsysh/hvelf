@@ -129,14 +129,17 @@ pub fn parse(text: &str) -> Result<VaultMap, String> {
         .iter()
         .map(|p| p.as_str().map(String::from).unwrap_or_else(|| p.to_string()))
         .collect();
+    // Only a fallback that fails its own checks is dropped; the map may
+    // report other problems (an alias not yet placed) beside a good one.
     let mut fallback = f.fallback;
-    if let Some(fb) = &fallback {
-        match vaults.iter().find(|v| &v.id == fb) {
-            None => problems.push(format!("the fallback {fb:?} is not one of the map's vaults")),
-            Some(v) if v.bounded || v.excluded => problems.push(format!("the fallback {fb:?} is bounded or excluded")),
-            Some(_) => {}
-        }
-        if !problems.is_empty() {
+    if let Some(fb) = fallback.clone() {
+        let bad = match vaults.iter().find(|v| v.id == fb) {
+            None => Some(format!("the fallback {fb:?} is not one of the map's vaults")),
+            Some(v) if v.bounded || v.excluded => Some(format!("the fallback {fb:?} is bounded or excluded")),
+            Some(_) => None,
+        };
+        if let Some(bad) = bad {
+            problems.push(bad);
             fallback = None;
         }
     }
@@ -256,6 +259,11 @@ mod tests {
         assert!(m.problems[0].contains("bounded"), "{:?}", m.problems);
         let m = parse(&sample("/v").replace("\"fallback\":\"Lab-OS\"", "\"fallback\":null,\"problems\":[\"exo does not resolve\"]")).unwrap();
         assert_eq!((m.fallback, m.problems), (None, vec!["exo does not resolve".to_string()]));
+        // The live map of 2026-10-04 reports aliases MIGRATION has not placed
+        // yet beside a good fallback: the fallback stands.
+        let m = parse(&sample("/v").replace("\"fallback\":\"Lab-OS\"", "\"fallback\":\"Lab-OS\",\"problems\":[\"alias exo points to Operational/exo, which does not exist\"]")).unwrap();
+        assert_eq!(m.fallback.as_deref(), Some("Lab-OS"));
+        assert_eq!(m.problems.len(), 1);
     }
 
     #[test]
