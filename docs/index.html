@@ -135,6 +135,11 @@
     <li><strong>Close from the board.</strong> Hovering an open tile reveals an
       <code>×</code> that closes that vault's window. It is an ordinary close, so
       Obsidian saves state, and the renderer gives back the RAM it was holding.</li>
+    <li><strong>Remove from the board.</strong> On a vault that is not open, the same
+      <code>×</code> takes its tile off the board, for vaults that have gone stale. The
+      first click asks and the second removes. The vault's path goes into
+      <code>hide</code> in the config and Obsidian is left alone; deleting the entry
+      brings the tile back.</li>
     <li><strong>Recency order.</strong> Tiles sort most-recently-used first. While
       hvelf runs it tracks which vault window you actually have focused, which beats
       Obsidian's own timestamps: those only update when a vault is opened, not while
