@@ -3,8 +3,13 @@ const { invoke } = window.__TAURI__.core;
 
 const filterEl = document.getElementById("filter");
 const groupsEl = document.getElementById("groups");
+const keepbarEl = document.getElementById("keepbar");
 const noticeEl = document.getElementById("notice");
+const hintTextEl = document.getElementById("hinttext");
 const hintEl = document.getElementById("hint");
+
+const HINT_BOARD = "1–9 launch · Enter first match · Ctrl+Q quit";
+const HINT_KEEP = "Enter or the chord keeps into the lit vault · 1–9 pick another · Esc parks it unrouted";
 
 // Failures come back as {ok:false, code, message, feature}; show the reason,
 // never a silent no-op. Text only: names and paths are data, not markup.
@@ -19,6 +24,11 @@ function clearNotice() {
 }
 if (window.__TAURI__.event) {
   window.__TAURI__.event.listen("hvelf-notice", (e) => showFailure(e.payload));
+  // The keep chord may land while the board is already up.
+  window.__TAURI__.event.listen("keep", () => {
+    filterEl.value = "";
+    refresh();
+  });
 }
 
 // Platform limits (Linux: Wayland, no window manager, missing handler) are
@@ -35,10 +45,20 @@ invoke("capabilities").then((caps) => {
 
 let tiles = [];   // full list from backend
 let visible = []; // filtered, in render order (for number keys / Enter)
+let pending = null; // a keep capture waiting for a vault, or null
 
 async function refresh() {
   try {
-    tiles = await invoke("list_vaults");
+    pending = await invoke("keep_pending");
+    if (pending) {
+      // In keep mode the tiles are the vault folders that take keeps, with
+      // the preselected one first and lit.
+      tiles = pending.vaults.map((n) => ({
+        name: n, path: "", open: false, pick: n === pending.vault, group: "keep into",
+      }));
+    } else {
+      tiles = await invoke("list_vaults");
+    }
   } catch (e) {
     groupsEl.replaceChildren();
     const p = document.createElement("p");
@@ -50,7 +70,33 @@ async function refresh() {
   render();
 }
 
+// Built as text nodes: a folder name may hold <, > or quotes.
+function el(cls, text) {
+  const s = document.createElement("span");
+  s.className = cls;
+  if (text !== undefined) s.textContent = text;
+  return s;
+}
+
+// The keep banner: what was captured, from where, and where it is going.
+function renderKeepbar() {
+  if (!pending) {
+    keepbarEl.replaceChildren();
+    keepbarEl.style.display = "none";
+    hintTextEl.textContent = HINT_BOARD;
+    return;
+  }
+  const meta = el("kmeta", `${pending.chars} chars · ${pending.app} → `);
+  const target = document.createElement("b");
+  target.textContent = pending.vault;
+  meta.appendChild(target);
+  keepbarEl.replaceChildren(el("kword", "keep"), el("kprev", pending.preview || "(whitespace)"), meta);
+  keepbarEl.style.display = "flex";
+  hintTextEl.textContent = HINT_KEEP;
+}
+
 function render() {
+  renderKeepbar();
   const q = filterEl.value.trim().toLowerCase();
   // The qualifier is filterable too: typing the parent folder is how you
   // pick between two vaults of the same name.
@@ -78,31 +124,28 @@ function render() {
       idx += 1;
       const tile = document.createElement("button");
       const reported = t.open && t.open_state === "reported";
-      tile.className = "tile" + (t.open ? " open" : "") + (reported ? " reported" : "");
+      tile.className = "tile" + (t.open ? " open" : "") + (reported ? " reported" : "") + (t.pick ? " pick" : "");
       tile.title = reported
         ? `${t.path}\nObsidian reports this vault open; not observed live, may be stale`
         : t.path;
-      // Built as text nodes: a folder name may hold <, > or quotes.
-      const el = (cls, text) => {
-        const s = document.createElement("span");
-        s.className = cls;
-        if (text !== undefined) s.textContent = text;
-        return s;
-      };
       const label = el("label");
       label.appendChild(el("name", t.name));
       if (t.qualifier) label.appendChild(el("qual", t.qualifier));
+      tile.append(el("badge", idx <= 9 ? String(idx) : ""), el("dot"), label);
       // One cross, two jobs: on an open vault it closes the window, on a
       // shut one it takes the tile off the board. Where this desktop gives
-      // hvelf no window control, it only removes, and says so.
+      // hvelf no window control, it only removes, and says so. A keep tile
+      // is a folder under the exocortex root and has neither.
       const canClose = t.open && !t.close_reason;
-      const cross = el("close", "×");
-      cross.title = canClose
-        ? "close vault (frees its RAM)"
-        : t.open
-          ? `remove from the board (closing is unavailable here: ${t.close_reason})`
-          : "remove from the board";
-      tile.append(el("badge", idx <= 9 ? String(idx) : ""), el("dot"), label, cross);
+      if (!pending) {
+        const cross = el("close", "×");
+        cross.title = canClose
+          ? "close vault (frees its RAM)"
+          : t.open
+            ? `remove from the board (closing is unavailable here: ${t.close_reason})`
+            : "remove from the board";
+        tile.appendChild(cross);
+      }
       tile.addEventListener("click", (e) => {
         if (e.target.classList.contains("close")) {
           e.stopPropagation();
@@ -123,7 +166,7 @@ function render() {
           render(); // a click anywhere else on the tile is a no
           return;
         }
-        launch(t.id);
+        pick(t);
       });
       tile.addEventListener("mouseleave", () => {
         if (tile.classList.contains("armed")) render();
@@ -138,27 +181,44 @@ function render() {
   }
 }
 
-// Tiles travel by Obsidian's vault id: two vaults can share a name, and
-// the label on a tile may carry a qualifier that no vault answers to.
-function launch(id) {
+// A tile: launch the vault, or in keep mode file the capture into it. A
+// board tile travels by Obsidian's vault id, since two vaults can share a
+// name and a label may carry a qualifier no vault answers to; a keep tile is
+// a folder under the exocortex root and travels by name.
+function pick(t) {
   clearNotice();
-  invoke("launch", { id }).catch(showFailure);
   filterEl.value = "";
+  if (pending) {
+    pending = null;
+    invoke("keep_file", { vault: t.name }).catch(showFailure);
+  } else {
+    invoke("launch", { id: t.id }).catch(showFailure);
+  }
+}
+
+// Esc in keep mode is "decide later", never "discard".
+async function dismiss() {
+  filterEl.value = "";
+  clearNotice();
+  if (pending) {
+    pending = null;
+    await invoke("keep_file", { vault: null }).catch(showFailure);
+  } else {
+    invoke("hide_window");
+  }
 }
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    filterEl.value = "";
-    clearNotice();
-    invoke("hide_window");
+    dismiss();
     return;
   }
   if (e.ctrlKey && (e.key === "q" || e.key === "Q")) {
-    invoke("quit");
+    dismiss().then(() => invoke("quit"));
     return;
   }
   if (e.key === "Enter" && visible.length > 0) {
-    launch(visible[0].id);
+    pick(visible[0]);
     return;
   }
   // Digits are quick picks while the filter is empty; once the user has
@@ -166,7 +226,7 @@ document.addEventListener("keydown", (e) => {
   if (/^[1-9]$/.test(e.key) && filterEl.value === "") {
     e.preventDefault();
     const i = parseInt(e.key, 10) - 1;
-    if (visible[i]) launch(visible[i].id);
+    if (visible[i]) pick(visible[i]);
     return;
   }
   // Anything printable focuses the filter so you can just start typing.

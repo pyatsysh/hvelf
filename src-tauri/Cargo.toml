@@ -17,6 +17,9 @@ serde = { version = "1", features = ["derive"] }
 # preserve_order: hiding a vault edits the user's config.json in place.
 serde_json = { version = "1", features = ["preserve_order"] }
 urlencoding = "2"
+toml = "0.8"
+sha2 = "0.10"
+chrono = "0.4"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -24,6 +27,17 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+] }
+# COM-level UI Automation, for reading a selection without the clipboard.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    "Win32_UI_Accessibility",
 ] }
 
 # Linux desktop adapters: x11rb speaks the X protocol in pure Rust for EWMH

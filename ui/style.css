@@ -55,6 +55,31 @@ html, body {
 }
 #filter:focus { border-color: rgba(124, 111, 255, 0.55); }
 
+/* keep mode banner: what was captured and where it is going */
+#keepbar {
+  display: none;
+  align-items: baseline;
+  gap: 10px;
+  margin-top: 12px;
+  padding: 8px 12px;
+  background: rgba(124, 111, 255, 0.12);
+  border: 1px solid rgba(124, 111, 255, 0.4);
+  border-radius: 8px;
+  font-size: 12.5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+#keepbar .kword { font-weight: 600; letter-spacing: 0.12em; color: #b3acff; text-transform: uppercase; font-size: 11px; flex: none; }
+#keepbar .kprev { flex: 1; overflow: hidden; text-overflow: ellipsis; font-style: italic; color: #e8e6e3; }
+#keepbar .kmeta { flex: none; color: #8a8794; }
+#keepbar .kmeta b { color: #e8e6e3; font-weight: 600; }
+
+.tile.pick {
+  background: rgba(124, 111, 255, 0.16);
+  border-color: rgba(124, 111, 255, 0.6);
+}
+.tile.pick .dot { background: #7c6fff; box-shadow: 0 0 6px rgba(124, 111, 255, 0.8); }
+
 #groups { flex: 1; overflow-y: auto; margin-top: 12px; }
 #groups::-webkit-scrollbar { width: 6px; }
 #groups::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
