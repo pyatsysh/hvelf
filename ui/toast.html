@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>hvelf</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { background: transparent; height: 100%; overflow: hidden; user-select: none; }
+    #pill {
+      height: 100%;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px;
+      background: rgba(19, 19, 24, 0.94);
+      border: 1px solid rgba(255, 255, 255, 0.09);
+      border-radius: 12px;
+      color: #e8e6e3;
+      font: 13.5px "Segoe UI", system-ui, sans-serif;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    }
+    #pill.bad { border-color: rgba(224, 108, 117, 0.6); }
+    #mark { width: 20px; height: 20px; border-radius: 5px; flex: none; }
+    #text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <div id="pill"><img id="mark" src="icon.png" alt="" draggable="false" /><span id="text"></span></div>
+  <script>
+    // Called from Rust through eval; the window itself never takes focus.
+    function show(text) {
+      document.getElementById("text").textContent = text;
+      document.getElementById("pill").className = /fail|nothing|cannot/i.test(text) ? "bad" : "";
+    }
+  </script>
+</body>
+</html>

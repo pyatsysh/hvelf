@@ -1,15 +1,31 @@
 // hvelf board UI: plain JS, no bundler.
 const { invoke } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 
 const filterEl = document.getElementById("filter");
 const groupsEl = document.getElementById("groups");
+const keepbarEl = document.getElementById("keepbar");
+const hintEl = document.getElementById("hint");
+
+const HINT_BOARD = "1–9 launch · Enter first match · Ctrl+Q quit";
+const HINT_KEEP = "Enter or the chord keeps into the lit vault · 1–9 pick another · Esc parks it unrouted";
 
 let tiles = [];   // full list from backend
 let visible = []; // filtered, in render order (for number keys / Enter)
+let pending = null; // a keep capture waiting for a vault, or null
 
 async function refresh() {
   try {
-    tiles = await invoke("list_vaults");
+    pending = await invoke("keep_pending");
+    if (pending) {
+      // In keep mode the tiles are the vault folders that take keeps, with
+      // the preselected one first and lit.
+      tiles = pending.vaults.map((n) => ({
+        name: n, path: "", open: false, pick: n === pending.vault, group: "keep into",
+      }));
+    } else {
+      tiles = await invoke("list_vaults");
+    }
   } catch (e) {
     groupsEl.innerHTML = `<p class="err">${e}</p>`;
     return;
@@ -20,6 +36,18 @@ async function refresh() {
 function render() {
   const q = filterEl.value.trim().toLowerCase();
   visible = tiles.filter((t) => !q || t.name.toLowerCase().includes(q));
+
+  if (pending) {
+    keepbarEl.innerHTML =
+      `<span class="kword">keep</span>` +
+      `<span class="kprev">${esc(pending.preview) || "(whitespace)"}</span>` +
+      `<span class="kmeta">${pending.chars} chars · ${esc(pending.app)} → <b>${esc(pending.vault)}</b></span>`;
+    keepbarEl.style.display = "flex";
+    hintEl.textContent = HINT_KEEP;
+  } else {
+    keepbarEl.style.display = "none";
+    hintEl.textContent = HINT_BOARD;
+  }
 
   const byGroup = new Map();
   for (const t of visible) {
@@ -40,12 +68,12 @@ function render() {
     for (const t of gtiles) {
       idx += 1;
       const tile = document.createElement("button");
-      tile.className = "tile" + (t.open ? " open" : "");
+      tile.className = "tile" + (t.open ? " open" : "") + (t.pick ? " pick" : "");
       tile.title = t.path;
       tile.innerHTML =
         `<span class="badge">${idx <= 9 ? idx : ""}</span>` +
         `<span class="dot"></span>` +
-        `<span class="name">${t.name}</span>` +
+        `<span class="name">${esc(t.name)}</span>` +
         (t.open ? `<span class="close" title="close vault (frees its RAM)">×</span>` : "");
       tile.addEventListener("click", (e) => {
         if (e.target.classList.contains("close")) {
@@ -54,7 +82,7 @@ function render() {
           setTimeout(refresh, 700); // give the window a moment to die
           return;
         }
-        launch(t.name);
+        pick(t.name);
       });
       grid.appendChild(tile);
     }
@@ -66,23 +94,43 @@ function render() {
   }
 }
 
-function launch(name) {
-  invoke("launch", { name });
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// A tile: launch the vault, or in keep mode file the capture into it.
+function pick(name) {
   filterEl.value = "";
+  if (pending) {
+    pending = null;
+    invoke("keep_file", { vault: name });
+  } else {
+    invoke("launch", { name });
+  }
+}
+
+// Esc in keep mode is "decide later", never "discard".
+async function dismiss() {
+  filterEl.value = "";
+  if (pending) {
+    pending = null;
+    await invoke("keep_file", { vault: null });
+  } else {
+    invoke("hide_window");
+  }
 }
 
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
-    filterEl.value = "";
-    invoke("hide_window");
+    dismiss();
     return;
   }
   if (e.ctrlKey && (e.key === "q" || e.key === "Q")) {
-    invoke("quit");
+    dismiss().then(() => invoke("quit"));
     return;
   }
   if (e.key === "Enter" && visible.length > 0) {
-    launch(visible[0].name);
+    pick(visible[0].name);
     return;
   }
   // Digits are quick picks while the filter is empty; once the user has
@@ -90,7 +138,7 @@ document.addEventListener("keydown", (e) => {
   if (/^[1-9]$/.test(e.key) && filterEl.value === "") {
     e.preventDefault();
     const i = parseInt(e.key, 10) - 1;
-    if (visible[i]) launch(visible[i].name);
+    if (visible[i]) pick(visible[i].name);
     return;
   }
   // Anything printable focuses the filter so you can just start typing.
@@ -105,6 +153,12 @@ filterEl.addEventListener("input", render);
 window.addEventListener("focus", () => {
   filterEl.value = "";
   filterEl.focus();
+  refresh();
+});
+
+// The keep chord may land while the board is already up.
+listen("keep", () => {
+  filterEl.value = "";
   refresh();
 });
 

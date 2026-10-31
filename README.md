@@ -34,6 +34,8 @@ open ones glowing.
   no taskbar clutter.
 - **Quick launch**: an optional second hotkey opens your most recent vault
   directly, skipping the board entirely.
+- **Keep**: highlight text in any app, press `Alt+K`, and it is filed
+  verbatim as a markdown note in a vault's `keeps/` folder. See below.
 - **Focus or launch**: a tile raises the vault's window if it is already open,
   and opens the vault through Obsidian's `obsidian://` URI if it is not.
 - **Live state**: tiles show which vaults are open right now, read from the
@@ -74,6 +76,8 @@ sits silent until the hotkey.
 {
   "hotkey": "alt+grave",
   "quickLaunch": "alt+1",
+  "keep": "alt+k",
+  "exocortex": "D:\\Dropbox\\Vaults\\Operational\\registry\\exocortex.toml",
   "hideOnBlur": true,
   "hide": ["OldVault"],
   "groups": [
@@ -92,7 +96,46 @@ sits silent until the hotkey.
 - `groups` order the board. Vaults you do not list fall into a trailing group.
 - `hide` removes a vault's tile without touching Obsidian.
 - `deepLinks` make a tile open a specific note, via `&file=` in the URI.
+- `keep` is the capture hotkey (default `alt+k`, empty to disable) and
+  `exocortex` the registry it reads, see below.
 - The config is read at startup, so restart hvelf after editing it.
+
+## Keep
+
+The capture half of a personal exocortex: the text under your mouse goes
+into a vault without a model, a dialog, or a round trip through Obsidian.
+
+Highlight text anywhere (browser, PDF reader, terminal, Word, Obsidian) and
+press the `keep` chord. hvelf reads the selection through UI Automation,
+which costs no clipboard and no injected keys, and falls back to a
+clipboard round trip (Ctrl+C, read, restore) for apps that do not expose
+their selection. Terminals never get the fallback, because Ctrl+C with
+nothing selected would interrupt whatever is running there. With nothing
+selected a small toast says so and nothing else happens.
+
+The board then opens in keep mode. A banner shows the first line and the
+character count, and the vault it will go to: the one named in the window
+title if any, else the one you last kept into. `Enter` or the chord again
+files it there, `1`–`9` or a click files it into another vault, `Esc` parks
+it in the fallback vault's `keeps/unrouted/` to decide later. A capture is
+never discarded: losing the board also parks it. Focus returns to the app
+you were in and a toast confirms `kept → vault`.
+
+Vaults are the subfolders of a root named in a small registry file:
+
+```toml
+[vaults]
+root = "/mnt/d/Dropbox/Vaults/Operational/research"
+fallback = "exo"
+```
+
+WSL paths are translated (`/mnt/d/...` to `D:\...`). With no registry the
+root defaults to `D:\Dropbox\Vaults\Operational\research` and the fallback
+to `exo`. Each note lands at `<root>/<vault>/keeps/<YYYY-MM>/<id>.md` with a
+YAML frontmatter (`id`, `ts`, `source`, `vault`, `app`, `title`, optional
+`url`, `sha256` of the body) and the selected text below it, byte for byte.
+Files are written to a temp name and renamed, so a sync client never sees
+a half note. The last vault used is remembered in `%APPDATA%\hvelf\state.json`.
 
 ## Status
 
