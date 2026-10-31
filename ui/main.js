@@ -51,10 +51,11 @@ async function refresh() {
   try {
     pending = await invoke("keep_pending");
     if (pending) {
-      // In keep mode the tiles are the vault folders that take keeps, with
+      // In keep mode the tiles are the vaults that take keeps, by id, with
       // the preselected one first and lit.
-      tiles = pending.vaults.map((n) => ({
-        name: n, path: "", open: false, pick: n === pending.vault, group: "keep into",
+      tiles = pending.vaults.map((v) => ({
+        id: v.id, name: v.name, qualifier: v.qualifier, bounded: v.bounded,
+        path: "", open: false, pick: v.id === pending.vault.id, group: "keep into",
       }));
     } else {
       tiles = await invoke("list_vaults");
@@ -88,8 +89,9 @@ function renderKeepbar() {
   }
   const meta = el("kmeta", `${pending.chars} chars · ${pending.app} → `);
   const target = document.createElement("b");
-  target.textContent = pending.vault;
+  target.textContent = pending.vault.id;
   meta.appendChild(target);
+  if (pending.vault.bounded) meta.appendChild(el("bound", " bounded"));
   keepbarEl.replaceChildren(el("kword", "keep"), el("kprev", pending.preview || "(whitespace)"), meta);
   keepbarEl.style.display = "flex";
   hintTextEl.textContent = HINT_KEEP;
@@ -124,13 +126,21 @@ function render() {
       idx += 1;
       const tile = document.createElement("button");
       const reported = t.open && t.open_state === "reported";
-      tile.className = "tile" + (t.open ? " open" : "") + (reported ? " reported" : "") + (t.pick ? " pick" : "");
-      tile.title = reported
-        ? `${t.path}\nObsidian reports this vault open; not observed live, may be stale`
-        : t.path;
+      const unknown = t.registered === false;
+      tile.className = "tile" + (t.open ? " open" : "") + (reported ? " reported" : "") + (t.pick ? " pick" : "")
+        + (t.missing ? " missing" : "") + (unknown ? " unregistered" : "") + (t.bounded ? " bounded" : "");
+      tile.title = t.missing
+        ? `${t.path}\nnot on this machine: Obsidian's registry still lists it here`
+        : unknown
+          ? `${t.path}\nnot a vault Obsidian knows yet: open the folder once with Obsidian's "Open folder as vault"`
+          : reported
+            ? `${t.path}\nObsidian reports this vault open; not observed live, may be stale`
+            : t.path;
       const label = el("label");
       label.appendChild(el("name", t.name));
       if (t.qualifier) label.appendChild(el("qual", t.qualifier));
+      // Bounded vaults (Admin, Career, Personal) are searched only when named.
+      if (t.bounded) label.appendChild(el("bound", "bounded"));
       tile.append(el("badge", idx <= 9 ? String(idx) : ""), el("dot"), label);
       // One cross, two jobs: on an open vault it closes the window, on a
       // shut one it takes the tile off the board. Where this desktop gives
@@ -190,7 +200,7 @@ function pick(t) {
   filterEl.value = "";
   if (pending) {
     pending = null;
-    invoke("keep_file", { vault: t.name }).catch(showFailure);
+    invoke("keep_file", { vault: t.id }).catch(showFailure);
   } else {
     invoke("launch", { id: t.id }).catch(showFailure);
   }

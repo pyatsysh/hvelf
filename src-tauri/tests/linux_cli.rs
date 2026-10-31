@@ -197,3 +197,58 @@ fn arguments_are_data_never_commands() {
     let out = hvelf(&["--toggle", "--quit"], &[("HOME", home.as_path())], &[]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// With Lab-OS's vault map, the board lists one tile per vault: a link and
+/// the folder it points at, both in Obsidian's registry, are one vault; a
+/// bounded vault says so; a vault of the map that Obsidian has never opened
+/// is listed as such; an entry whose folder is gone is marked missing.
+#[test]
+fn the_vault_map_dedups_links_and_marks_bounded_unknown_and_missing() {
+    let home = root("map");
+    let cfg = home.join("cfg");
+    let bin = home.join("bin");
+    fake_bin(&bin, "xdg-mime", "exit 0");
+    let v = home.join("Vaults");
+    for d in ["Research/AI/AL/.obsidian", "Admin/.obsidian", "Lab-OS/.obsidian"] {
+        std::fs::create_dir_all(v.join(d)).unwrap();
+    }
+    std::os::unix::fs::symlink(v.join("Research/AI/AL"), v.join("AL")).unwrap();
+    let r = v.display().to_string();
+    let map = serde_json::json!({
+        "schema": "labos-vault-map/v1", "root": r, "fallback": "Lab-OS",
+        "vaults": [
+            {"id": "Admin", "path": format!("{r}/Admin"), "partition": "Admin", "bounded": true},
+            {"id": "Lab-OS", "path": format!("{r}/Lab-OS"), "partition": "global"},
+            {"id": "Research/AI/AL", "path": format!("{r}/Research/AI/AL"), "partition": "global", "aliases": ["AL"]},
+        ]
+    });
+    std::fs::write(home.join("map.json"), map.to_string()).unwrap();
+    fake_bin(&bin, "exo", &format!("[ \"$1 $2\" = \"vaults --json\" ] && /bin/cat '{}'", home.join("map.json").display()));
+    let registry = serde_json::json!({"vaults": {
+        "1111111111111111": {"path": format!("{r}/AL"), "ts": 5},
+        "2222222222222222": {"path": format!("{r}/Research/AI/AL"), "ts": 9},
+        "3333333333333333": {"path": format!("{r}/Admin"), "ts": 1},
+        "4444444444444444": {"path": "/gone/Dropbox/melt", "ts": 3},
+    }});
+    std::fs::create_dir_all(cfg.join("obsidian")).unwrap();
+    std::fs::write(cfg.join("obsidian/obsidian.json"), registry.to_string()).unwrap();
+
+    let env = [("HOME", home.as_path()), ("XDG_CONFIG_HOME", cfg.as_path()), ("PATH", bin.as_path())];
+    let t = tiles(&hvelf(&["--list-vaults"], &env, &[]));
+    let ids: Vec<&str> = t.iter().map(|x| x["id"].as_str().unwrap()).collect();
+    assert_eq!(t.len(), 4, "{ids:?}");
+    let by = |id: &str| t.iter().find(|x| x["id"] == id).unwrap_or_else(|| panic!("no tile {id} in {ids:?}"));
+    assert_eq!(by("2222222222222222")["canonical"], "Research/AI/AL", "the one Obsidian used last");
+    assert!(!ids.contains(&"1111111111111111"), "the link is the same vault");
+    assert_eq!(by("3333333333333333")["bounded"], true);
+    assert_eq!(by("4444444444444444")["missing"], true);
+    assert_eq!(by("map:Lab-OS")["registered"], false);
+
+    // Without the map command the registry is shown as it is, and says so.
+    let plain = home.join("bin-plain");
+    fake_bin(&plain, "xdg-mime", "exit 0");
+    let env = [("HOME", home.as_path()), ("XDG_CONFIG_HOME", cfg.as_path()), ("PATH", plain.as_path())];
+    let out = hvelf(&["--list-vaults"], &env, &[]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no vault map"));
+    assert_eq!(tiles(&out).len(), 4, "all four registry entries, the missing one marked");
+}

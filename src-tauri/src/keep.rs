@@ -21,6 +21,23 @@ pub struct Exocortex {
     pub fallback: String,
     /// Vaults the exocortex never takes; the native `keep` refuses them too.
     pub excluded: Vec<String>,
+    /// The vaults by canonical id when they come from Lab-OS's vault map;
+    /// None for the registry reading, where they are the folders at the root.
+    pub mapped: Option<Vec<Target>>,
+    /// Why the vault map says nothing may be filed, when it says so.
+    pub problem: Option<String>,
+}
+
+/// A vault a keep can go to.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Target {
+    /// What the keep records as `vault:` and its path under the root: a
+    /// canonical id such as `Research/AI/AL`, or a folder name at the root.
+    pub id: String,
+    /// Names a window title may carry for it.
+    pub names: Vec<String>,
+    /// In a bounded partition: searched only when named, never global.
+    pub bounded: bool,
 }
 
 #[cfg(windows)]
@@ -66,7 +83,7 @@ pub fn parse_exocortex(text: &str) -> Option<Exocortex> {
     } else {
         f.vaults.fallback
     };
-    Some(Exocortex { root, fallback, excluded: f.vaults.excluded })
+    Some(Exocortex { root, fallback, excluded: f.vaults.excluded, mapped: None, problem: None })
 }
 
 pub fn load_exocortex(path: &Path) -> Exocortex {
@@ -88,15 +105,56 @@ impl Default for Exocortex {
             root: PathBuf::from(DEFAULT_ROOT),
             fallback: DEFAULT_FALLBACK.to_string(),
             excluded: Vec::new(),
+            mapped: None,
+            problem: None,
         }
     }
 }
 
 impl Exocortex {
+    /// Keeps as Lab-OS's vault map lays them out: its root, its fallback and
+    /// its vaults by canonical id. The map has already resolved the
+    /// registry, so nothing here reads exocortex.toml.
+    pub fn from_map(m: &crate::vaultmap::VaultMap) -> Exocortex {
+        let targets = m
+            .vaults
+            .iter()
+            .filter(|v| !v.excluded)
+            .map(|v| Target { id: v.id.clone(), names: v.title_names(), bounded: v.bounded() })
+            .collect();
+        let problem = match &m.fallback {
+            Some(_) => None,
+            None if m.problems.is_empty() => Some("the vault map names no fallback vault".into()),
+            None => Some(format!("the vault map names no fallback vault: {}", m.problems.join("; "))),
+        };
+        Exocortex {
+            root: m.root.clone(),
+            fallback: m.fallback.clone().unwrap_or_default(),
+            excluded: Vec::new(),
+            mapped: Some(targets),
+            problem,
+        }
+    }
+
+    /// The vaults a keep may go to, by id.
+    pub fn targets(&self) -> Vec<Target> {
+        match &self.mapped {
+            Some(t) => t.clone(),
+            None => self
+                .vaults()
+                .into_iter()
+                .map(|n| Target { id: n.clone(), names: vec![n], bounded: false })
+                .collect(),
+        }
+    }
+
     /// Why nothing can be filed here, if so. Asked before a capture is
     /// taken, so a broken registry costs the user nothing: the selection is
     /// still where it was.
     pub fn unusable(&self) -> Option<String> {
+        if let Some(p) = &self.problem {
+            return Some(p.clone());
+        }
         if self.root.as_os_str().is_empty() {
             return Some("no vault root is named (no exocortex.toml, or one without [vaults] root)".into());
         }
@@ -165,13 +223,25 @@ pub fn list_vaults(root: &Path) -> Vec<String> {
 /// Pick the vault whose name appears in the window title as a whole word
 /// (a short name like "AL" must not fire on "Journal"); the longest match
 /// wins so "cdft_dimInterp" beats "cDFT". Case-insensitive.
+#[cfg(test)]
 pub fn preselect(title: &str, vaults: &[String]) -> Option<String> {
-    let t = title.to_lowercase();
-    vaults
+    let targets: Vec<Target> = vaults
         .iter()
-        .filter(|v| !v.is_empty() && contains_word(&t, &v.to_lowercase()))
-        .max_by_key(|v| v.len())
-        .cloned()
+        .map(|v| Target { id: v.clone(), names: vec![v.clone()], bounded: false })
+        .collect();
+    preselect_target(title, &targets)
+}
+
+/// The same over vaults with several names: the vault whose name or alias
+/// is the longest whole word in the title, by its id.
+pub fn preselect_target(title: &str, targets: &[Target]) -> Option<String> {
+    let t = title.to_lowercase();
+    targets
+        .iter()
+        .flat_map(|g| g.names.iter().map(move |n| (n, &g.id)))
+        .filter(|(n, _)| !n.is_empty() && contains_word(&t, &n.to_lowercase()))
+        .max_by_key(|(n, _)| n.len())
+        .map(|(_, id)| id.clone())
 }
 
 fn contains_word(hay: &str, needle: &str) -> bool {
@@ -218,30 +288,32 @@ pub struct Meta {
     pub url: Option<String>,
 }
 
-/// The whole file: frontmatter, then the body byte for byte. The body
-/// gets one trailing newline if it has none; the sha256 covers the body
-/// bytes exactly as written, that newline included.
+/// The whole file in the native `keep` format: frontmatter, then the body
+/// with LF line endings and one trailing newline, the sha256 covering the
+/// body exactly as written. exo reads keeps with universal newlines, so a
+/// CR kept in the body would read back as an altered keep.
 pub fn render(meta: &Meta, body: &str) -> Vec<u8> {
-    let mut b = body.as_bytes().to_vec();
-    if !b.ends_with(b"\n") {
-        b.push(b'\n');
+    let mut b = body.replace("\r\n", "\n").replace('\r', "\n");
+    if !b.ends_with('\n') {
+        b.push('\n');
     }
-    let sha = hex(&Sha256::digest(&b));
+    let sha = hex(&Sha256::digest(b.as_bytes()));
     let mut out = String::new();
     out.push_str("---\n");
     out.push_str(&format!("id: {}\n", meta.id));
     out.push_str(&format!("ts: {}\n", meta.ts));
     out.push_str("source: selection\n");
-    out.push_str(&format!("vault: {}\n", scalar(&meta.vault)));
-    out.push_str(&format!("app: {}\n", scalar(&meta.app)));
-    out.push_str(&format!("title: {}\n", json_escape(&meta.title)));
-    if let Some(u) = &meta.url {
-        out.push_str(&format!("url: {}\n", json_escape(u)));
+    // Empty values are left out, as `keep` leaves them out.
+    let fields = [("vault", Some(&meta.vault)), ("app", Some(&meta.app)), ("title", Some(&meta.title)), ("url", meta.url.as_ref())];
+    for (k, v) in fields {
+        if let Some(v) = v.filter(|v| !v.is_empty()) {
+            out.push_str(&format!("{k}: {}\n", scalar(v)));
+        }
     }
     out.push_str(&format!("sha256: {sha}\n"));
     out.push_str("---\n");
     let mut bytes = out.into_bytes();
-    bytes.extend_from_slice(&b);
+    bytes.extend_from_slice(b.as_bytes());
     bytes
 }
 
@@ -271,25 +343,30 @@ pub fn unrouted_path(root: &Path, fallback: &str, id: &str) -> PathBuf {
 
 /// Write a keep under `<root>/<vault>/` only when that vault's folder is
 /// there. A capture never creates a vault: a vanished or misnamed one fails
-/// loudly, as the native `keep` refuses a vault that does not exist.
+/// loudly, as the native `keep` refuses a vault that does not exist. The
+/// vault is a plain path under the root (`Research/AI/AL`), and a link that
+/// leads out of the root is refused, not followed.
 pub fn write_in_vault(root: &Path, vault: &str, path: &Path, bytes: &[u8]) -> io::Result<()> {
-    if vault.is_empty() || vault == "." || vault == ".." || vault.contains(['/', '\\']) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{vault:?} is not a vault name")));
+    if !crate::vaultmap::plain_relative(vault) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{vault:?} is not a vault under the root")));
     }
     let dir = root.join(vault);
     if !dir.is_dir() {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("no vault folder at {}", dir.display())));
     }
+    if !fs::canonicalize(&dir)?.starts_with(fs::canonicalize(root)?) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} leads out of the vault root", dir.display())));
+    }
     write_atomic(path, bytes)
 }
 
-/// Write via a sibling temp file and rename, so a sync client never sees
-/// a half-written note.
+/// Write via a sibling `.part` file and rename, as `keep` does, so neither a
+/// sync client nor the indexer ever sees a half-written note.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path.parent().ok_or_else(|| io::Error::other("no parent"))?;
     fs::create_dir_all(dir)?;
     let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".tmp");
+    tmp.push(".part");
     let tmp = PathBuf::from(tmp);
     fs::write(&tmp, bytes)?;
     if let Err(e) = fs::rename(&tmp, path) {
@@ -435,7 +512,7 @@ hello world\n";
     }
 
     #[test]
-    fn body_verbatim_with_one_trailing_newline() {
+    fn body_gets_lf_endings_and_one_trailing_newline() {
         let meta = Meta {
             id: "i".into(),
             ts: "t".into(),
@@ -444,10 +521,13 @@ hello world\n";
             title: "".into(),
             url: None,
         };
-        // A body that already ends in a newline is not given another.
-        let s = String::from_utf8(render(&meta, "  two\r\nlines \n")).unwrap();
-        assert!(s.ends_with("---\n  two\r\nlines \n"));
-        assert!(!s.contains("url:"));
+        // A body that already ends in a newline is not given another, and
+        // CRs become LFs, as `keep` writes them.
+        let s = String::from_utf8(render(&meta, "  two\r\nlines \rthree\n")).unwrap();
+        assert!(s.ends_with("---\n  two\nlines \nthree\n"), "{s}");
+        assert!(!s.contains("url:") && !s.contains("title:"), "empty values are left out");
+        let line = s.lines().find(|l| l.starts_with("sha256: ")).unwrap();
+        assert_eq!(line, format!("sha256: {}", hex(&Sha256::digest(b"  two\nlines \nthree\n"))));
         // The hash covers the body as written, newline included.
         let s2 = String::from_utf8(render(&meta, "x")).unwrap();
         let line = s2.lines().find(|l| l.starts_with("sha256: ")).unwrap();
@@ -473,7 +553,7 @@ hello world\n";
         let p = dir.join("a").join("b.md");
         write_atomic(&p, b"body\n").unwrap();
         assert_eq!(fs::read(&p).unwrap(), b"body\n");
-        assert!(!dir.join("a").join("b.md.tmp").exists());
+        assert!(!dir.join("a").join("b.md.part").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -496,7 +576,7 @@ hello world\n";
         std::os::unix::fs::symlink(&elsewhere, root.join("AL")).unwrap();
         std::os::unix::fs::symlink(root.join("gone"), root.join("dangling")).unwrap();
         assert_eq!(list_vaults(&root), ["AL", "archive", "exo"]);
-        let exo = Exocortex { root: root.clone(), fallback: "exo".into(), excluded: vec!["archive".into()] };
+        let exo = Exocortex { root: root.clone(), fallback: "exo".into(), excluded: vec!["archive".into()], ..Exocortex::default() };
         assert_eq!(exo.vaults(), ["AL", "exo"]);
         assert_eq!(exo.unusable(), None);
         let _ = fs::remove_dir_all(&root);
@@ -505,7 +585,7 @@ hello world\n";
 
     #[test]
     fn an_unusable_registry_says_why() {
-        let none = Exocortex { root: PathBuf::new(), fallback: "exo".into(), excluded: vec![] };
+        let none = Exocortex { root: PathBuf::new(), fallback: "exo".into(), excluded: vec![], ..Exocortex::default() };
         assert!(none.unusable().unwrap().contains("no vault root"));
         let gone = Exocortex { root: scratch("gone").join("not-there"), ..none.clone() };
         assert!(gone.unusable().unwrap().contains("does not exist"));
@@ -523,11 +603,40 @@ hello world\n";
         let e = write_in_vault(&root, "Nope", &into("Nope"), b"x").unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound);
         assert!(!root.join("Nope").exists());
-        for bad in ["", ".", "..", "a/b", "a\\b"] {
+        // A canonical id is a path under the root.
+        fs::create_dir_all(root.join("Research/AI/AL")).unwrap();
+        write_in_vault(&root, "Research/AI/AL", &into("Research/AI/AL"), b"x\n").unwrap();
+        assert!(root.join("Research/AI/AL/keeps/2026-10/id1.md").is_file());
+        let e = write_in_vault(&root, "Research/AI/XX", &into("Research/AI/XX"), b"x").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound);
+        for bad in ["", ".", "..", "../x", "/abs", "a//b", "a/../b", "a\\b"] {
             let e = write_in_vault(&root, bad, &root.join("x.md"), b"x").unwrap_err();
             assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{bad:?}");
         }
+        #[cfg(unix)]
+        {
+            let outside = scratch("outside");
+            std::os::unix::fs::symlink(&outside, root.join("Out")).unwrap();
+            let e = write_in_vault(&root, "Out", &into("Out"), b"x").unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput);
+            assert!(!outside.join("keeps").exists());
+            let _ = fs::remove_dir_all(&outside);
+        }
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn titles_pick_vaults_by_any_of_their_names() {
+        let t = |id: &str, names: &[&str]| Target { id: id.into(), names: names.iter().map(|s| s.to_string()).collect(), bounded: false };
+        let targets = [
+            t("Research/AI/AL", &["AL"]),
+            t("Lab-OS", &["Lab-OS", "chat-gpt", "labos"]),
+            t("Research", &["Research"]),
+        ];
+        assert_eq!(preselect_target("notes - AL - Obsidian v1.6.7", &targets).as_deref(), Some("Research/AI/AL"));
+        assert_eq!(preselect_target("labos - Visual Studio Code", &targets).as_deref(), Some("Lab-OS"));
+        assert_eq!(preselect_target("AL Research plan", &targets).as_deref(), Some("Research"), "longest name wins");
+        assert_eq!(preselect_target("Journal", &targets), None);
     }
 
     #[test]

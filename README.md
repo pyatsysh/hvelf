@@ -123,6 +123,15 @@ first run:
 - `deepLinks` make a tile open a specific note, via `&file=` in the URI.
 - `keep` is the capture hotkey (default `alt+k`, empty to disable) and
   `exocortex` the registry it reads, see below.
+- `vaultMap` is a command printing Lab-OS's vault map (`labos-vault-map/v1`).
+  With one, the board shows one tile per vault of the map and the keep chord
+  files by the map's ids, see below; empty, the board is Obsidian's registry
+  alone.
+- On Linux the defaults differ: `hotkey` is `ctrl+alt+grave`, since GNOME
+  binds Alt and the key above Tab to switching an application's windows
+  (`alt+grave` still works once that binding is freed); `vaultMap` is
+  `["exo", "vaults", "--json"]`; `exocortex` is Lab-OS's
+  `/opt/labos/current/kernel/instance/exocortex.toml`.
 - Entries in `hide`, `groups` and `deepLinks` name a vault by its name, or by
   its full path, which is the only way to name one of two vaults that share a
   name (`"hide": ["D:\\delme\\moreland-dispute"]`).
@@ -160,7 +169,17 @@ does, for a desktop shortcut. Wayland gives no application another one's
 selection, so there capture is unsupported and `hvelf --capabilities` says
 so.
 
-Vaults are the subfolders of a root named in a small registry file:
+Where keeps go comes from Lab-OS's vault map when `vaultMap` names one (the
+Linux default). Its vaults are identified by their path under the vault root
+once links resolve, such as `Research/AI/AL`; a keep lands at
+`<root>/<id>/keeps/<YYYY-MM>/<keep id>.md` and records `vault: <id>`. A
+name the map lists for a vault (a link such as `AL`, an old name) selects
+it from a window title like its own name. Bounded vaults are marked, the
+fallback is the map's, and exocortex.toml is not read. A map that cannot be
+read leaves nothing to file into, and the chord says why.
+
+Without a map, vaults are the subfolders of a root named in a small registry
+file:
 
 ```toml
 [vaults]
@@ -177,9 +196,10 @@ count as vaults; `excluded` vaults are never offered. A keep is only written
 into a vault folder that exists: with no usable root or fallback vault the
 chord says so and takes nothing. Each note lands at `<root>/<vault>/keeps/<YYYY-MM>/<id>.md` with a
 YAML frontmatter (`id`, `ts`, `source`, `vault`, `app`, `title`, optional
-`url`, `sha256` of the body) and the selected text below it, byte for byte.
-Files are written to a temp name and renamed, so a sync client never sees
-a half note. The last vault used is remembered in `%APPDATA%\hvelf\state.json`.
+`url`, `sha256` of the body) and the selected text below it, in the format
+Lab-OS's own `keep` writes: LF line endings, empty values left out, plain
+values bare and others quoted as JSON. Files are written to a `.part` name
+and renamed, so neither a sync client nor the indexer sees a half note. The last vault used is remembered in `%APPDATA%\hvelf\state.json`.
 
 ## Status
 
@@ -213,6 +233,14 @@ shortcuts are a separate feature: the desktop portal provides an API on
 supported desktops, but this build only detects that API and does not bind
 through it. Closing on X11 is a request handled by Obsidian, never a process
 kill, and hvelf does not edit vault files.
+
+With Lab-OS's vault map the board shows one tile per vault: a link and the
+folder it points at, which Obsidian lists as two vaults, are one tile, the
+one Obsidian used last. A vault in a bounded partition (Admin, Career,
+Personal) is marked. A vault of the map that holds an `.obsidian` folder but
+that Obsidian has never opened is shown dimmed and says how to open it, and
+an entry of Obsidian's registry whose folder is gone is marked missing
+instead of being handed to Obsidian.
 
 A running board takes commands from a second invocation over D-Bus:
 `hvelf --toggle`, `--show`, `--hide`, `--quick-launch`, `--keep` and `--quit`. Bind

@@ -1032,6 +1032,11 @@ mod tests {
         let (wm, screen) = x11rb::connect(None).unwrap();
         let root = wm.setup().roots[screen].root;
         let atom = |n: &[u8]| wm.intern_atom(false, n).unwrap().reply().unwrap().atom;
+        // The test plays the window manager and injects keys: never on a
+        // display where a real window manager runs.
+        let check = atom(b"_NET_SUPPORTING_WM_CHECK");
+        let real_wm = wm.get_property(false, root, check, x11rb::protocol::xproto::AtomEnum::WINDOW, 0, 1).unwrap().reply().unwrap();
+        assert!(real_wm.value.is_empty(), "a window manager runs on this display: run this test on a private Xvfb only");
         let (cl, act, close, sup, name, utf8) = (
             atom(b"_NET_CLIENT_LIST"), atom(b"_NET_ACTIVE_WINDOW"), atom(b"_NET_CLOSE_WINDOW"),
             atom(b"_NET_SUPPORTED"), atom(b"_NET_WM_NAME"), atom(b"UTF8_STRING"),

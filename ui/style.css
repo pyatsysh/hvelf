@@ -191,3 +191,10 @@ section h2 {
 .tile.open.reported .dot { background: transparent; box-shadow: none; border: 1.5px solid #58c472; }
 #notice { margin: 0 0 8px; }
 #hint .limits { cursor: help; opacity: 0.8; }
+
+/* Bounded vaults (Admin, Career, Personal) are searched only when named. */
+.tile .bound, #keepbar .bound { font-size: 10px; color: #d9a441; letter-spacing: 0.04em; }
+/* Gone from disk, or not yet a vault Obsidian knows: shown, dimmed, and the
+   click says why it cannot open. */
+.tile.missing, .tile.unregistered { opacity: 0.55; }
+.tile.missing .name { text-decoration: line-through; }

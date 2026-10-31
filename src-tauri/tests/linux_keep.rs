@@ -30,6 +30,13 @@ fn enabled() -> bool {
         eprintln!("skipped: run under xvfb-run and dbus-run-session with HVELF_X11_TEST=1");
         return false;
     }
+    // This test plays the window manager and owns the selection; on a display
+    // where a real one runs it would act on somebody's desktop. Refuse.
+    let (conn, screen) = x11rb::connect(None).expect("the test display");
+    let root = conn.setup().roots[screen].root;
+    let check = conn.intern_atom(false, b"_NET_SUPPORTING_WM_CHECK").unwrap().reply().unwrap().atom;
+    let wm = conn.get_property(false, root, check, AtomEnum::WINDOW, 0, 1).unwrap().reply().unwrap();
+    assert!(wm.value.is_empty(), "a window manager runs on this display: run this test on a private Xvfb only");
     true
 }
 
@@ -155,7 +162,39 @@ struct Fixture {
     log: PathBuf,
 }
 
+/// A fake `exo` printing a labos-vault-map/v1 map of `root`: Research/AI/AL
+/// with its link AL, the fallback Lab-OS and a bounded Admin.
+fn fake_map(home: &Path, root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    for d in ["Research/AI/AL", "Lab-OS", "Admin"] {
+        std::fs::create_dir_all(root.join(d)).unwrap();
+    }
+    std::os::unix::fs::symlink(root.join("Research/AI/AL"), root.join("AL")).unwrap();
+    let r = root.display().to_string();
+    let map = serde_json::json!({
+        "schema": "labos-vault-map/v1", "root": r, "fallback": "Lab-OS",
+        "vaults": [
+            {"id": "Admin", "path": format!("{r}/Admin"), "partition": "Admin", "bounded": true, "aliases": ["admin"]},
+            {"id": "Lab-OS", "path": format!("{r}/Lab-OS"), "partition": "global", "aliases": ["labos"]},
+            {"id": "Research/AI/AL", "path": format!("{r}/Research/AI/AL"), "partition": "global", "aliases": ["AL"]},
+        ]
+    });
+    let json = home.join("map.json");
+    std::fs::write(&json, map.to_string()).unwrap();
+    let exo = home.join("fake exo");
+    std::fs::write(&exo, format!("#!/bin/sh\n[ \"$1 $2\" = \"vaults --json\" ] || exit 2\n/bin/cat '{}'\n", json.display())).unwrap();
+    std::fs::set_permissions(&exo, std::fs::Permissions::from_mode(0o755)).unwrap();
+    exo
+}
+
 fn fixture(tag: &str, registry: Option<&str>) -> Fixture {
+    fixture_with(tag, registry, false)
+}
+
+/// With `mapped`, the vaults come from a fake `exo vaults --json`; without,
+/// from the registry file, and no map command is configured at all, so the
+/// real `exo` is never run.
+fn fixture_with(tag: &str, registry: Option<&str>, mapped: bool) -> Fixture {
     let home = root(tag);
     let cfg = home.join("cfg é");
     let vaults = home.join("Vaults root");
@@ -168,9 +207,14 @@ fn fixture(tag: &str, registry: Option<&str>) -> Fixture {
     });
     std::fs::write(&toml, reg).unwrap();
     std::fs::create_dir_all(cfg.join("hvelf")).unwrap();
+    let map: Vec<String> = if mapped {
+        vec![fake_map(&home, &vaults.join("mapped")).display().to_string(), "vaults".into(), "--json".into()]
+    } else {
+        Vec::new()
+    };
     let conf = serde_json::json!({
         "hotkey": "", "quickLaunch": "", "keep": "",
-        "exocortex": toml.display().to_string(), "hideOnBlur": false,
+        "exocortex": toml.display().to_string(), "vaultMap": map, "hideOnBlur": false,
     });
     std::fs::write(cfg.join("hvelf/config.json"), conf.to_string()).unwrap();
     let log = home.join("hvelf.log");
@@ -257,12 +301,14 @@ impl Drop for Board<'_> {
     }
 }
 
+/// Keeps under `dir`, links not followed, so a vault reached through a link
+/// is counted once.
 fn keeps_in(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = std::fs::read_dir(dir) {
         for e in rd.flatten() {
             let p = e.path();
-            if p.is_dir() {
+            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
                 out.extend(keeps_in(&p));
             } else if p.extension().is_some_and(|x| x == "md") {
                 out.push(p);
@@ -402,5 +448,27 @@ fn capture_files_refuses_and_never_invents_a_vault() {
     board.keep();
     board.wait_log("does not exist");
     assert!(!missing.exists(), "a capture never creates a vault root");
+    drop(front);
+    drop(board);
+
+    // Lab-OS's vault map: the title's AL is an alias of Research/AI/AL, the
+    // keep lands there and records the canonical id; the bounded Admin is
+    // offered and marked, and exocortex.toml is not read at all.
+    let h = fixture_with("mapped", Some("this is not toml ["), true);
+    let mapped = h.vaults.join("mapped");
+    let board = Board::start(&h);
+    let caps: Vec<serde_json::Value> = serde_json::from_slice(&run(&h, &["--capabilities"]).stdout).unwrap();
+    let get = |name: &str| caps.iter().find(|c| c["capability"] == name).unwrap().clone();
+    assert_eq!(get("vault-map")["state"], "available", "{}", get("vault-map"));
+    assert!(get("vault-map")["reason"].as_str().unwrap().starts_with("3 vaults under"));
+    assert_eq!(get("keep-capture")["state"], "available", "{}", get("keep-capture"));
+    let title = "draft - AL - Obsidian v1.6.7";
+    let front = Front::new(title, Some("a mapped keep"));
+    board.keep();
+    board.wait_log("Research/AI/AL is lit; vaults Research/AI/AL, Admin, Lab-OS\n");
+    board.keep();
+    let got = wait_files(&mapped.join("Research/AI/AL/keeps"), 1);
+    check_note(&got[0], "Research/AI/AL", title, "a mapped keep");
+    assert_eq!(keeps_in(&mapped).len(), 1, "one keep, reached through the link only once");
     drop(front);
 }

@@ -16,6 +16,7 @@ mod hotkey_macos;
 mod keep;
 #[cfg(target_os = "linux")]
 mod linux;
+mod vaultmap;
 
 // ------------------------------------------------------- shared vocabulary
 
@@ -75,6 +76,10 @@ struct Config {
     keep: String,
     /// exocortex.toml, which names the vault root and the fallback vault.
     exocortex: String,
+    /// The command that prints Lab-OS's vault map (labos-vault-map/v1). With
+    /// one, the board and the keep chord take their vaults from it; empty,
+    /// the board shows Obsidian's registry alone and keeps go by `exocortex`.
+    vault_map: Vec<String>,
     hide_on_blur: bool,
     hide: Vec<String>,
     groups: Vec<Group>,
@@ -91,10 +96,11 @@ struct Group {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            hotkey: "alt+grave".into(),
+            hotkey: default_hotkey().into(),
             quick_launch: String::new(),
             keep: "alt+k".into(),
             exocortex: keep::DEFAULT_REGISTRY.into(),
+            vault_map: default_vault_map(),
             hide_on_blur: true,
             hide: Vec::new(),
             groups: Vec::new(),
@@ -103,11 +109,43 @@ impl Default for Config {
     }
 }
 
+/// `alt+grave` everywhere but Linux, where GNOME already binds Alt and the
+/// key above Tab to switching an application's windows; Ctrl+Alt with that
+/// key is bound by nothing there. `alt+grave` stays a choice in the config.
+fn default_hotkey() -> &'static str {
+    if cfg!(target_os = "linux") {
+        "ctrl+alt+grave"
+    } else {
+        "alt+grave"
+    }
+}
+
+/// Lab-OS's exo prints the vault map on Linux; elsewhere there is none.
+fn default_vault_map() -> Vec<String> {
+    if cfg!(target_os = "linux") {
+        ["exo", "vaults", "--json"].map(String::from).to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Does a config entry name this vault? Entries are vault names, as they
 /// always have been; a full path also matches, which is the only way to name
-/// one of two vaults that share a name.
+/// one of two vaults that share a name. A path matches once links resolve,
+/// so hiding a vault also hides a link to it that Obsidian lists apart.
 fn entry_matches(entry: &str, v: &Vault) -> bool {
-    entry == v.name || norm_path(entry) == norm_path(&v.path)
+    entry == v.name
+        || norm_path(entry) == norm_path(&v.path)
+        || (Path::new(entry).is_absolute() && same_dir(Path::new(entry), Path::new(&v.path)))
+}
+
+/// Two paths name the same folder once links resolve. A path that does not
+/// resolve matches nothing here.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
 }
 
 fn norm_path(p: &str) -> String {
@@ -255,6 +293,97 @@ struct VaultTile {
     /// Why the cross cannot close this vault's window here; empty when it can.
     close_reason: String,
     group: String,
+    /// The vault's id in Lab-OS's vault map (`Research/AI/AL`), empty for a
+    /// vault the map does not hold.
+    canonical: String,
+    /// In a bounded partition (Admin, Career, Personal): searched only when
+    /// named. The tile says so.
+    bounded: bool,
+    /// Obsidian still lists the vault, but its folder is not on this machine.
+    missing: bool,
+    /// False for a vault of the map that Obsidian has never opened: the tile
+    /// shows it, and says how to open it, but cannot open it itself.
+    registered: bool,
+}
+
+/// Ids of tiles for vaults of the map that Obsidian does not know: this
+/// prefix, then the canonical id.
+const MAP_TILE: &str = "map:";
+
+// ---------------------------------------------------------------- vault map
+
+/// Lab-OS's vault map as last read, and when. The board takes the copy in
+/// hand and has an old one reread in the background; the keep chord, off
+/// the main thread, rereads an old one before it files anything.
+#[derive(Clone, Default)]
+struct MapCache(Arc<Mutex<MapSlot>>);
+
+#[derive(Default)]
+struct MapSlot {
+    read: Option<(std::time::Instant, Result<vaultmap::VaultMap, String>)>,
+    reading: bool,
+}
+
+const MAP_FRESH: std::time::Duration = std::time::Duration::from_secs(30);
+const MAP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Read the map now, or None when the config names no map command.
+fn read_map(cfg: &Config) -> Option<Result<vaultmap::VaultMap, String>> {
+    (!cfg.vault_map.is_empty()).then(|| vaultmap::load(&cfg.vault_map, MAP_TIMEOUT))
+}
+
+impl MapCache {
+    /// The map, read again when the copy is old. Waits on the command.
+    fn fresh(&self, cfg: &Config) -> Option<Result<vaultmap::VaultMap, String>> {
+        if cfg.vault_map.is_empty() {
+            return None;
+        }
+        if let Some((at, r)) = &self.0.lock().unwrap().read {
+            if at.elapsed() < MAP_FRESH {
+                return Some(r.clone());
+            }
+        }
+        let r = read_map(cfg)?;
+        self.0.lock().unwrap().read = Some((std::time::Instant::now(), r.clone()));
+        Some(r)
+    }
+
+    /// The copy in hand, for the board: it waits only while no copy has
+    /// ever been read, and an old copy is reread in the background.
+    fn cached(&self, cfg: &Config) -> Option<vaultmap::VaultMap> {
+        if cfg.vault_map.is_empty() {
+            return None;
+        }
+        let held = self.0.lock().unwrap().read.as_ref().map(|(at, r)| (at.elapsed() >= MAP_FRESH, r.clone()));
+        match held {
+            None => self.fresh(cfg).and_then(|r| r.ok()),
+            Some((old, r)) => {
+                if old {
+                    self.refresh_in_background(cfg);
+                }
+                r.ok()
+            }
+        }
+    }
+
+    fn refresh_in_background(&self, cfg: &Config) {
+        {
+            let mut slot = self.0.lock().unwrap();
+            if slot.reading {
+                return;
+            }
+            slot.reading = true;
+        }
+        let (me, cfg) = (self.clone(), cfg.clone());
+        std::thread::spawn(move || {
+            let r = read_map(&cfg);
+            let mut slot = me.0.lock().unwrap();
+            if let Some(r) = r {
+                slot.read = Some((std::time::Instant::now(), r));
+            }
+            slot.reading = false;
+        });
+    }
 }
 
 fn obsidian_json_path() -> PathBuf {
@@ -662,26 +791,77 @@ fn window_for(vaults: &[Vault], v: &Vault) -> Option<isize> {
 // ---------------------------------------------------------------- commands
 
 #[tauri::command]
-fn list_vaults(cfg: State<SharedConfig>, hist: State<FocusHistory>) -> Result<Vec<VaultTile>, Failure> {
-    Ok(tiles(&cfg.get(), &hist, load_registry()?))
+fn list_vaults(cfg: State<SharedConfig>, hist: State<FocusHistory>, maps: State<MapCache>) -> Result<Vec<VaultTile>, Failure> {
+    let cfg = cfg.get();
+    let map = maps.cached(&cfg);
+    Ok(tiles(&cfg, &hist, load_registry()?, map.as_ref()))
 }
 
-fn tiles(cfg: &Config, hist: &FocusHistory, all: Vec<Vault>) -> Vec<VaultTile> {
+fn tiles(cfg: &Config, hist: &FocusHistory, all: Vec<Vault>, map: Option<&vaultmap::VaultMap>) -> Vec<VaultTile> {
     // Open state is read against the whole registry, since a hidden vault
     // still has a window and its title is indistinguishable from its
     // namesake's; labels are only about what the board shows.
     let open = open_ids(&all);
     let open_state = open_confidence();
     let close_reason = close_unavailable();
-    let shown: Vec<&Vault> = all.iter().filter(|v| !cfg.hidden(v)).collect();
+    let recency = |v: &Vault| v.ts.max(focused_ts(hist, &all, v));
+    // With a vault map, Obsidian's entries that are one vault (a link and
+    // the folder it points at) make one tile: the one Obsidian used last.
+    let locate = map.map(|m| m.locator());
+    let canon: Vec<Option<&vaultmap::MapVault>> = all
+        .iter()
+        .map(|v| locate.as_ref().and_then(|l| l.at(Path::new(&v.path))))
+        .collect();
+    let mut known: HashSet<&str> = HashSet::new();
+    let mut shown: Vec<(Vault, Option<&vaultmap::MapVault>, bool)> = Vec::new();
+    for (i, v) in all.iter().enumerate() {
+        let Some(mv) = canon[i] else {
+            if !cfg.hidden(v) {
+                shown.push((v.clone(), None, true));
+            }
+            continue;
+        };
+        if !known.insert(mv.id.as_str()) {
+            continue;
+        }
+        let best = all
+            .iter()
+            .zip(&canon)
+            .filter(|(o, c)| c.map(|c| c.id == mv.id).unwrap_or(false) && !cfg.hidden(o))
+            .map(|(o, _)| o)
+            .max_by_key(|o| recency(o));
+        if let Some(best) = best {
+            shown.push((best.clone(), Some(mv), true));
+        }
+    }
+    // The map's Obsidian vaults that Obsidian has not opened yet: shown, so
+    // the board covers the vault root, but they cannot be opened from here.
+    if let Some(m) = map {
+        for mv in &m.vaults {
+            if known.contains(mv.id.as_str()) || mv.excluded || !mv.path.join(".obsidian").is_dir() {
+                continue;
+            }
+            let v = Vault {
+                id: format!("{MAP_TILE}{}", mv.id),
+                name: mv.name().to_string(),
+                path: mv.path.display().to_string(),
+                ts: 0,
+                open: false,
+            };
+            if !cfg.hidden(&v) && !cfg.hide.iter().any(|e| e == &mv.id) {
+                shown.push((v, Some(mv), false));
+            }
+        }
+    }
+    let refs: Vec<&Vault> = shown.iter().map(|(v, _, _)| v).collect();
     // Rank by whichever is newer: Obsidian's last-opened stamp or hvelf's
     // own last-focused record. Groups keep config order; recency within.
     let mut ranked: Vec<(usize, u64, VaultTile)> = shown
         .iter()
-        .zip(qualifiers(&shown))
-        .map(|(v, qualifier)| {
+        .zip(qualifiers(&refs))
+        .map(|((v, mv, registered), qualifier)| {
             let (pos, group) = cfg.group_of(v);
-            let eff = v.ts.max(focused_ts(hist, &all, v));
+            let eff = if *registered { recency(v) } else { 0 };
             (
                 pos,
                 eff,
@@ -694,6 +874,10 @@ fn tiles(cfg: &Config, hist: &FocusHistory, all: Vec<Vault>) -> Vec<VaultTile> {
                     open_state,
                     close_reason: close_reason.clone(),
                     group,
+                    canonical: mv.map(|m| m.id.clone()).unwrap_or_default(),
+                    bounded: mv.map(|m| m.bounded()).unwrap_or(false),
+                    missing: *registered && !Path::new(&v.path).is_dir(),
+                    registered: *registered,
                 },
             )
         })
@@ -755,12 +939,19 @@ fn close_vault(id: String) -> Result<(), Failure> {
 /// namesake keeps its tile. Obsidian's registry is left alone, and Hidden
 /// vaults in the tray menu brings the tile back.
 #[tauri::command]
-fn hide_vault(app: AppHandle, cfg: State<SharedConfig>, id: String) -> Result<(), String> {
-    let all = registered_vaults();
-    let v = all.iter().find(|v| v.id == id).ok_or("no such vault")?;
+fn hide_vault(app: AppHandle, cfg: State<SharedConfig>, maps: State<MapCache>, id: String) -> Result<(), String> {
+    // A map tile is a folder Obsidian does not know; any other, its vault.
+    let path = match id.strip_prefix(MAP_TILE) {
+        Some(cid) => {
+            let m = maps.cached(&cfg.get()).ok_or("no vault map")?;
+            m.vaults.iter().find(|v| v.id == cid).ok_or("no such vault")?.path.display().to_string()
+        }
+        None => registered_vaults().into_iter().find(|v| v.id == id).ok_or("no such vault")?.path,
+    };
+    let v = Vault { id, name: basename(&path), path, ts: 0, open: false };
     {
         let mut cfg = cfg.0.lock().unwrap();
-        if cfg.hidden(v) {
+        if cfg.hidden(&v) {
             return Ok(());
         }
         edit_hide(&config_file(), |h| h.push(v.path.clone().into()))?;
@@ -818,12 +1009,26 @@ fn hidden_menu(hide: &[String], all: &[Vault]) -> Vec<(String, String)> {
 }
 
 fn do_launch(app: &AppHandle, cfg: &Config, id: &str) -> Result<(), Failure> {
-    hide_window(app.clone());
+    if let Some(cid) = id.strip_prefix(MAP_TILE) {
+        return Err(Failure::new(
+            "missing-input",
+            format!("{cid} is not a vault Obsidian knows yet: open its folder once with Obsidian's \"Open folder as vault\", and this tile opens it from then on"),
+            "open-vault",
+        ));
+    }
     let all = registered_vaults();
     let v = match all.iter().find(|v| v.id == id) {
         Some(v) => v,
         None => return Err(Failure::new("missing-input", "that vault is no longer in Obsidian's registry", "open-vault")),
     };
+    if !Path::new(&v.path).is_dir() {
+        return Err(Failure::new(
+            "missing-input",
+            format!("{} is not on this machine; Obsidian's registry still lists the vault there", v.path),
+            "open-vault",
+        ));
+    }
+    hide_window(app.clone());
     // An already-open vault is focused by hvelf itself: as the recipient of
     // the user's hotkey or click, hvelf holds the foreground-change rights
     // that Windows denies to a background Obsidian asked via URI. The URI
@@ -927,14 +1132,22 @@ fn focused_ts(hist: &FocusHistory, vaults: &[Vault], v: &Vault) -> u64 {
 fn most_recent_vault(cfg: &Config, hist: &FocusHistory) -> Option<String> {
     let all = registered_vaults();
     all.iter()
-        .filter(|v| !cfg.hidden(v))
+        .filter(|v| !cfg.hidden(v) && Path::new(&v.path).is_dir())
         .max_by_key(|v| v.ts.max(focused_ts(hist, &all, v)))
         .map(|v| v.id.clone())
 }
 
 #[tauri::command]
 fn launch(app: AppHandle, cfg: State<SharedConfig>, id: String) -> Result<(), Failure> {
-    do_launch(&app, &cfg.get(), &id)
+    let r = do_launch(&app, &cfg.get(), &id);
+    // The board may have gone already; bring it back to say why.
+    if r.is_err() {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+    }
+    r
 }
 
 /// A launch that nobody invoked from the board (a chord, a command line):
@@ -952,13 +1165,16 @@ fn launch_or_tell(app: &AppHandle, cfg: &Config, id: &str) {
 
 #[tauri::command]
 #[allow(unused_variables)]
-fn capabilities(runtime: State<RuntimeCaps>, cfg: State<SharedConfig>) -> Vec<Capability> {
+fn capabilities(runtime: State<RuntimeCaps>, cfg: State<SharedConfig>, maps: State<MapCache>) -> Vec<Capability> {
     #[allow(unused_mut)]
     let mut out: Vec<Capability> = Vec::new();
     #[cfg(target_os = "linux")]
     {
+        let cfg = cfg.get();
+        let map = maps.fresh(&cfg);
         out.extend(linux::capabilities());
-        out.push(keep_capability(&cfg.get()));
+        out.push(map_capability(&cfg, &map));
+        out.push(keep_capability(&cfg, map));
     }
     out.extend(runtime.0.lock().unwrap().iter().cloned());
     out
@@ -983,10 +1199,11 @@ struct Pending {
     app: String,
     title: String,
     url: Option<String>,
-    /// Preselected vault: from the window title, else the last one used.
+    /// Preselected vault, by id: from the window title, else the last one
+    /// used, else the fallback.
     vault: String,
     /// Vault tiles in board order, preselected first.
-    vaults: Vec<String>,
+    vaults: Vec<keep::Target>,
     exo: keep::Exocortex,
     /// Window to give the focus back to once the note is filed.
     source: isize,
@@ -1044,9 +1261,25 @@ fn save_persisted(p: &Persisted) {
 struct KeepInfo {
     preview: String,
     chars: usize,
-    vault: String,
-    vaults: Vec<String>,
+    /// The lit vault, by id, as a tile.
+    vault: KeepTile,
+    vaults: Vec<KeepTile>,
     app: String,
+}
+
+/// A vault in keep mode: its id, which is what the board files by, and the
+/// name and parent folders it shows.
+#[derive(Serialize, Clone)]
+struct KeepTile {
+    id: String,
+    name: String,
+    qualifier: String,
+    bounded: bool,
+}
+
+fn keep_tile(t: &keep::Target) -> KeepTile {
+    let (qualifier, name) = t.id.rsplit_once('/').unwrap_or(("", &t.id));
+    KeepTile { id: t.id.clone(), name: name.to_string(), qualifier: qualifier.to_string(), bounded: t.bounded }
 }
 
 #[tauri::command]
@@ -1054,8 +1287,13 @@ fn keep_pending(keep: State<KeepState>) -> Option<KeepInfo> {
     keep.0.lock().unwrap().as_ref().map(|p| KeepInfo {
         preview: keep::preview(&p.body, 60),
         chars: p.body.chars().count(),
-        vault: p.vault.clone(),
-        vaults: p.vaults.clone(),
+        vault: p
+            .vaults
+            .iter()
+            .find(|t| t.id == p.vault)
+            .map(keep_tile)
+            .unwrap_or_else(|| keep_tile(&keep::Target { id: p.vault.clone(), names: vec![], bounded: false })),
+        vaults: p.vaults.iter().map(keep_tile).collect(),
         app: p.app.clone(),
     })
 }
@@ -1124,28 +1362,35 @@ fn file_pending(app: &AppHandle, keep: &KeepState, route: Route, restore_focus: 
 }
 
 /// Vaults as tiles: the preselected one first, then the rest in the
-/// board's own recency order, then any the board does not know about.
+/// board's own recency order, then those the board does not know. A vault of
+/// the map is ranked by the Obsidian vault in the same folder; at a legacy
+/// root, by the Obsidian vault of the same name.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
-fn order_for_board(vaults: &[String], pre: &str, cfg: &Config, hist: &FocusHistory) -> Vec<String> {
-    let all = registered_vaults();
-    let mut ranked: Vec<(String, u64)> = all
+fn order_for_board(
+    targets: &[keep::Target],
+    pre: &str,
+    exo: &keep::Exocortex,
+    all: &[Vault],
+    cfg: &Config,
+    hist: &FocusHistory,
+) -> Vec<keep::Target> {
+    let mapped = exo.mapped.is_some();
+    let recency = |t: &keep::Target| -> u64 {
+        all.iter()
+            .filter(|v| !cfg.hidden(v))
+            .filter(|v| if mapped { same_dir(Path::new(&v.path), &exo.root.join(&t.id)) } else { v.name == t.id })
+            .map(|v| v.ts.max(focused_ts(hist, all, v)))
+            .max()
+            .unwrap_or(0)
+    };
+    let mut ranked: Vec<(u64, &keep::Target)> = targets.iter().filter(|t| t.id != pre).map(|t| (recency(t), t)).collect();
+    ranked.sort_by_key(|(eff, _)| std::cmp::Reverse(*eff));
+    let first = targets
         .iter()
-        .filter(|v| vaults.contains(&v.name) && !cfg.hidden(v))
-        .map(|v| (v.name.clone(), v.ts.max(focused_ts(hist, &all, v))))
-        .collect();
-    ranked.sort_by_key(|(_, eff)| std::cmp::Reverse(*eff));
-    let mut out: Vec<String> = vec![pre.to_string()];
-    for (name, _) in ranked {
-        if !out.contains(&name) {
-            out.push(name);
-        }
-    }
-    for name in vaults {
-        if !out.contains(name) {
-            out.push(name.clone());
-        }
-    }
-    out
+        .find(|t| t.id == pre)
+        .cloned()
+        .unwrap_or_else(|| keep::Target { id: pre.to_string(), names: vec![], bounded: false });
+    std::iter::once(first).chain(ranked.into_iter().map(|(_, t)| t.clone())).collect()
 }
 
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
@@ -1197,9 +1442,9 @@ fn start_keep(app: &AppHandle, cfg: &Config, hist: &FocusHistory, keep: &KeepSta
     } else {
         None
     };
-    let exo = keep::load_exocortex(Path::new(&cfg.exocortex));
+    let exo = keep_destination(app, cfg);
     if let Some(why) = keep_blocker(&exo) {
-        toast(app, &format!("keep: {why}; registry {}", cfg.exocortex));
+        toast(app, &format!("keep: {why}; {}", keep_source(cfg)));
         return;
     }
     let c = Captured { body, app: src.exe.clone(), title: src.title.clone(), url, source: src.hwnd };
@@ -1219,9 +1464,9 @@ fn start_keep(app: &AppHandle, cfg: &Config, hist: &FocusHistory, keep: &KeepSta
         file_pending(app, keep, Route::Preselected, true);
         return;
     }
-    let exo = keep::load_exocortex(Path::new(&cfg.exocortex));
+    let exo = keep_destination(app, cfg);
     if let Some(why) = keep_blocker(&exo) {
-        toast(app, &format!("keep: {why}; registry {}", cfg.exocortex));
+        toast(app, &format!("keep: {why}; {}", keep_source(cfg)));
         return;
     }
     let now = chrono::Local::now();
@@ -1232,6 +1477,33 @@ fn start_keep(app: &AppHandle, cfg: &Config, hist: &FocusHistory, keep: &KeepSta
             queue_keep(app, cfg, hist, keep, exo, now, c);
         }
         Err(why) => toast(app, &format!("keep: {why}")),
+    }
+}
+
+/// Where keeps go: Lab-OS's vault map when the config names one, else the
+/// registry file. A map that cannot be read leaves nothing to file into:
+/// without it there is no guessing at a root.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn destination(cfg: &Config, map: Option<Result<vaultmap::VaultMap, String>>) -> keep::Exocortex {
+    match map {
+        None => keep::load_exocortex(Path::new(&cfg.exocortex)),
+        Some(Ok(m)) => keep::Exocortex::from_map(&m),
+        Some(Err(e)) => keep::Exocortex { problem: Some(format!("no vault map ({e})")), ..keep::Exocortex::default() },
+    }
+}
+
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn keep_destination(app: &AppHandle, cfg: &Config) -> keep::Exocortex {
+    destination(cfg, app.state::<MapCache>().fresh(cfg))
+}
+
+/// Where the vaults came from, for a message that has to say.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn keep_source(cfg: &Config) -> String {
+    if cfg.vault_map.is_empty() {
+        format!("registry {}", cfg.exocortex)
+    } else {
+        format!("vault map from `{}`", cfg.vault_map.join(" "))
     }
 }
 
@@ -1258,21 +1530,28 @@ fn queue_keep(
     now: chrono::DateTime<chrono::Local>,
     c: Captured,
 ) {
-    let vaults = exo.vaults();
-    if vaults.is_empty() {
+    let targets = exo.targets();
+    if targets.is_empty() {
         eprintln!("hvelf: no vaults under {}", exo.root.display());
     }
+    // The last vault kept into, as it was recorded: an id, or an older name
+    // that one of the vaults still answers to.
     let last = load_persisted().last_keep_vault;
-    let pre = keep::preselect(&c.title, &vaults)
-        .or_else(|| vaults.contains(&last).then(|| last.clone()))
+    let last = targets
+        .iter()
+        .find(|t| t.id == last)
+        .or_else(|| targets.iter().find(|t| t.names.contains(&last)))
+        .map(|t| t.id.clone());
+    let pre = keep::preselect_target(&c.title, &targets)
+        .or(last)
         .unwrap_or_else(|| exo.fallback.clone());
-    let ordered = order_for_board(&vaults, &pre, cfg, hist);
+    let ordered = order_for_board(&targets, &pre, &exo, &registered_vaults(), cfg, hist);
     // Names and a count only: the text itself never goes to a log.
     eprintln!(
         "hvelf: keep: {} chars from {} are waiting on the board; {pre} is lit; vaults {}",
         c.body.chars().count(),
         c.app,
-        ordered.join(", ")
+        ordered.iter().map(|t| t.id.as_str()).collect::<Vec<_>>().join(", ")
     );
     let pending = Pending {
         body: c.body,
@@ -1314,11 +1593,39 @@ fn keep_from_command(app: &AppHandle) {
     toast(app, "keep: capture is not available on this platform");
 }
 
+/// Whether the vaults come from Lab-OS's vault map, for
+/// `hvelf --capabilities` and the limits under the board.
+#[cfg(target_os = "linux")]
+fn map_capability(cfg: &Config, map: &Option<Result<vaultmap::VaultMap, String>>) -> Capability {
+    let source = cfg.vault_map.join(" ");
+    match map {
+        None => linux::cap(
+            "vault-map",
+            "disabled",
+            "no vaultMap command in config.json: the board shows Obsidian's registry alone and keeps go by exocortex",
+            "config.json",
+        ),
+        Some(Err(e)) => linux::cap("vault-map", "unavailable", e.clone(), source),
+        Some(Ok(m)) => linux::cap(
+            "vault-map",
+            "available",
+            format!(
+                "{} vaults under {}, fallback {}{}",
+                m.vaults.len(),
+                m.root.display(),
+                m.fallback.as_deref().unwrap_or("none"),
+                if m.problems.is_empty() { String::new() } else { format!("; problems: {}", m.problems.join("; ")) }
+            ),
+            source,
+        ),
+    }
+}
+
 /// Whether the keep chord can capture in this session, for
 /// `hvelf --capabilities` and the limits under the board.
 #[cfg(target_os = "linux")]
-fn keep_capability(cfg: &Config) -> Capability {
-    let source = cfg.exocortex.clone();
+fn keep_capability(cfg: &Config, map: Option<Result<vaultmap::VaultMap, String>>) -> Capability {
+    let source = keep_source(cfg);
     match linux::session() {
         linux::Session::Wayland => linux::cap(
             "keep-capture",
@@ -1327,8 +1634,8 @@ fn keep_capability(cfg: &Config) -> Capability {
             source,
         ),
         linux::Session::Headless => linux::cap("keep-capture", "unavailable", "no graphical session", source),
-        linux::Session::X11 => match keep_blocker(&keep::load_exocortex(Path::new(&cfg.exocortex))) {
-            Some(why) => linux::cap("keep-capture", "unavailable", format!("{why}; point exocortex in config.json at the registry"), source),
+        linux::Session::X11 => match keep_blocker(&destination(cfg, map)) {
+            Some(why) => linux::cap("keep-capture", "unavailable", why, source),
             None => linux::cap(
                 "keep-capture",
                 "available",
@@ -1810,8 +2117,11 @@ fn main() {
             let mut caps: Vec<Capability> = Vec::new();
             #[cfg(target_os = "linux")]
             {
+                let cfg = read_config();
+                let map = read_map(&cfg);
                 caps.extend(linux::capabilities());
-                caps.push(keep_capability(&read_config()));
+                caps.push(map_capability(&cfg, &map));
+                caps.push(keep_capability(&cfg, map));
             }
             println!("{}", serde_json::to_string_pretty(&caps).unwrap());
             return;
@@ -1820,7 +2130,16 @@ fn main() {
             // Names, paths, ids and open state only; never vault contents.
             match load_registry() {
                 Ok(all) => {
-                    let t = tiles(&load_or_seed_config(), &FocusHistory::default(), all);
+                    let cfg = load_or_seed_config();
+                    let map = match read_map(&cfg) {
+                        Some(Ok(m)) => Some(m),
+                        Some(Err(e)) => {
+                            eprintln!("hvelf: no vault map: {e}");
+                            None
+                        }
+                        None => None,
+                    };
+                    let t = tiles(&cfg, &FocusHistory::default(), all, map.as_ref());
                     println!("{}", serde_json::to_string_pretty(&t).unwrap());
                 }
                 Err(f) => {
@@ -1856,6 +2175,7 @@ fn main() {
         .manage(SharedConfig(std::sync::Arc::new(std::sync::Mutex::new(cfg))))
         .manage(FocusHistory::default())
         .manage(KeepState::default())
+        .manage(MapCache::default())
         .manage(runtime_caps)
         .setup(move |app| {
             // The tray loads its indicator library at run time on Linux; a
@@ -1876,6 +2196,7 @@ fn main() {
             }
             let cfg = app.state::<SharedConfig>().inner().clone();
             let hist = app.state::<FocusHistory>().inner().clone();
+            app.state::<MapCache>().refresh_in_background(&cfg.get());
             spawn_hotkeys(app.handle().clone(), cfg, hist);
             if let Some(a) = initial {
                 perform(app.handle(), a);
@@ -1944,7 +2265,7 @@ mod tests {
         }}"#).unwrap();
         let all = vaults_from(reg);
         let cfg = Config::default();
-        let t = tiles(&cfg, &FocusHistory::default(), all);
+        let t = tiles(&cfg, &FocusHistory::default(), all, None);
         let ids: HashSet<&str> = t.iter().map(|x| x.id.as_str()).collect();
         assert_eq!(ids.len(), 3);
         let notes: Vec<&VaultTile> = t.iter().filter(|x| x.name == "notes").collect();
@@ -2022,6 +2343,71 @@ mod tests {
         let keys: Vec<String> = doc.as_object().unwrap().keys().cloned().collect();
         assert_eq!(keys, ["zeta", "hide", "hotkey"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_vault_map_makes_one_tile_per_vault_and_marks_the_bounded() {
+        let root = std::env::temp_dir().join(format!("hvelf-tiles-map-{} é", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["Research/AI/AL/.obsidian", "Admin/.obsidian", "Lab-OS/.obsidian", "Learning"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        std::os::unix::fs::symlink(root.join("Research/AI/AL"), root.join("AL")).unwrap();
+        let r = root.display().to_string();
+        let map = vaultmap::parse(
+            &serde_json::json!({
+                "schema": vaultmap::SCHEMA, "root": r, "fallback": "Lab-OS",
+                "vaults": [
+                    {"id": "Admin", "path": format!("{r}/Admin"), "partition": "Admin", "bounded": true},
+                    {"id": "Lab-OS", "path": format!("{r}/Lab-OS"), "partition": "global"},
+                    {"id": "Learning", "path": format!("{r}/Learning"), "partition": "global"},
+                    {"id": "Research/AI/AL", "path": format!("{r}/Research/AI/AL"), "partition": "global", "aliases": ["AL"]},
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let at = |id: &str, path: String, ts: u64| Vault { id: id.into(), name: basename(&path), path, ts, open: false };
+        let all = vec![
+            at("aaaa", format!("{r}/AL"), 5),
+            at("bbbb", format!("{r}/Research/AI/AL"), 9),
+            at("cccc", format!("{r}/Admin"), 1),
+            at("dddd", "/gone/melt".into(), 3),
+        ];
+        let t = tiles(&Config::default(), &FocusHistory::default(), all.clone(), Some(&map));
+        let by = |id: &str| t.iter().find(|x| x.id == id);
+        assert!(by("aaaa").is_none(), "a link is the vault it points at");
+        let al = by("bbbb").unwrap();
+        assert_eq!((al.canonical.as_str(), al.registered, al.missing, al.qualifier.as_str()), ("Research/AI/AL", true, false, ""));
+        assert!(by("cccc").unwrap().bounded);
+        assert!(!al.bounded);
+        let gone = by("dddd").unwrap();
+        assert!(gone.missing && gone.canonical.is_empty());
+        let lab = by("map:Lab-OS").unwrap();
+        assert!(!lab.registered && !lab.missing);
+        assert!(by("map:Learning").is_none(), "a vault of the map without .obsidian is no Obsidian vault");
+        assert_eq!(t.len(), 4);
+
+        // Hiding the folder hides the link Obsidian lists apart, and a hidden
+        // vault does not come back as one Obsidian does not know.
+        let mut cfg = Config::default();
+        cfg.hide = vec![format!("{r}/Research/AI/AL")];
+        let t = tiles(&cfg, &FocusHistory::default(), all.clone(), Some(&map));
+        assert!(t.iter().all(|x| x.canonical != "Research/AI/AL"), "{:?}", t.iter().map(|x| &x.id).collect::<Vec<_>>());
+        cfg.hide = vec!["Lab-OS".into()];
+        let t = tiles(&cfg, &FocusHistory::default(), all, Some(&map));
+        assert!(t.iter().all(|x| x.id != "map:Lab-OS"));
+
+        // Keep mode ranks the map's vaults by the Obsidian vault in the same
+        // folder: AL was used last, so it follows the lit fallback.
+        let exo = keep::Exocortex::from_map(&map);
+        let targets = exo.targets();
+        let order = order_for_board(&targets, "Lab-OS", &exo, &[at("bbbb", format!("{r}/Research/AI/AL"), 9)], &Config::default(), &FocusHistory::default());
+        let ids: Vec<&str> = order.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["Lab-OS", "Research/AI/AL", "Admin", "Learning"]);
+        assert_eq!(keep_tile(&order[1]).qualifier, "Research/AI");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
