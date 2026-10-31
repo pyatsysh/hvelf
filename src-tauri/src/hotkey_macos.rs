@@ -270,4 +270,12 @@ pub fn install(app: AppHandle, cfg: SharedConfig, hist: FocusHistory) {
         register("hotkey", &boot.hotkey, 1);
         register("quickLaunch", &boot.quick_launch, 2);
     }
+
+    // `keep` is not registered here. Its capture reads the selection through
+    // UI Automation on Windows and X11's PRIMARY on Linux; neither exists on
+    // macOS, and binding the chord to nothing would be worse than leaving it
+    // unbound.
+    if !boot.keep.is_empty() {
+        eprintln!("hvelf: keep chord not bound; capture is not implemented on macOS");
+    }
 }
