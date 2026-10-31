@@ -239,7 +239,6 @@ fn load_or_seed_config() -> Config {
 
 /// The config as it stands, without seeding a file: for probes that must not
 /// write.
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn read_config() -> Config {
     fs::read_to_string(config_file())
         .ok()
@@ -981,11 +980,7 @@ fn unhide(app: &AppHandle, entry: &str) {
 fn hidden_menu(hide: &[String], all: &[Vault]) -> Vec<(String, String)> {
     let mut seen = HashSet::new();
     let entries: Vec<&String> = hide.iter().filter(|e| seen.insert(e.as_str())).collect();
-    let name_of = |e: &str| {
-        all.iter()
-            .find(|v| entry_matches(e, v))
-            .map_or_else(|| basename(e), |v| v.name.clone())
-    };
+    let name_of = |e: &str| name_of(e, all);
     let mut items: Vec<(String, String)> = entries
         .iter()
         .map(|e| {
@@ -1006,6 +1001,28 @@ fn hidden_menu(hide: &[String], all: &[Vault]) -> Vec<(String, String)> {
         .collect();
     items.sort_by_key(|(_, label)| label.to_lowercase());
     items
+}
+
+/// What a `hide` entry calls its vault: the name of the registry vault it
+/// names, else the last part of the entry itself.
+fn name_of(entry: &str, all: &[Vault]) -> String {
+    all.iter()
+        .find(|v| entry_matches(entry, v))
+        .map_or_else(|| basename(entry), |v| v.name.clone())
+}
+
+/// The `hide` entries `hvelf --unhide <arg>` puts back. A path matches its
+/// own entry; a bare name matches every entry whose vault has that name,
+/// as Obsidian matches names, ignoring case. The tray takes back exactly
+/// the one entry it lists instead.
+fn unhide_matches(arg: &str, hide: &[String], all: &[Vault]) -> Vec<String> {
+    let is_path = arg.contains('/') || (cfg!(windows) && arg.contains('\\'));
+    let mut seen = HashSet::new();
+    hide.iter()
+        .filter(|e| seen.insert(e.as_str()))
+        .filter(|e| if is_path { norm_path(e) == norm_path(arg) } else { same_name(&name_of(e, all), arg) })
+        .cloned()
+        .collect()
 }
 
 fn do_launch(app: &AppHandle, cfg: &Config, id: &str) -> Result<(), Failure> {
@@ -2025,13 +2042,16 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
 // shortcut binds where no global chord can be grabbed. No argument keeps
 // the old meaning: toggle the board.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Action {
     Toggle,
     Show,
     Hide,
     QuickLaunch,
     Keep,
+    /// Put back the hidden vaults a name or path matches: the way back on a
+    /// desktop that shows no tray.
+    Unhide(String),
     Quit,
 }
 
@@ -2040,14 +2060,16 @@ enum Cli {
     Run(Option<Action>),
     Capabilities,
     ListVaults,
+    Hidden,
     Help,
 }
 
-const USAGE: &str = "usage: hvelf [--toggle | --show | --hide | --quick-launch | --keep | --quit | --capabilities | --list-vaults | --help]";
+const USAGE: &str = "usage: hvelf [--toggle | --show | --hide | --quick-launch | --keep | --quit | --capabilities | --list-vaults | --hidden | --unhide <name or path> | --help]";
 
 fn parse_cli(args: &[String]) -> Result<Cli, String> {
     let mut out = Cli::Run(None);
-    for a in args.iter().skip(1) {
+    let mut it = args.iter().skip(1);
+    while let Some(a) = it.next() {
         let next = match a.as_str() {
             "--toggle" => Cli::Run(Some(Action::Toggle)),
             "--show" => Cli::Run(Some(Action::Show)),
@@ -2057,6 +2079,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
             "--quit" => Cli::Run(Some(Action::Quit)),
             "--capabilities" => Cli::Capabilities,
             "--list-vaults" => Cli::ListVaults,
+            "--hidden" => Cli::Hidden,
+            "--unhide" => match it.next() {
+                Some(v) if !v.is_empty() && !v.starts_with("--") => Cli::Run(Some(Action::Unhide(v.clone()))),
+                _ => return Err("--unhide needs the name or path of a hidden vault".into()),
+            },
             "-h" | "--help" => Cli::Help,
             other => return Err(format!("unknown argument {other:?}")),
         };
@@ -2079,6 +2106,16 @@ fn perform(app: &AppHandle, action: Action) {
         }
         Action::Hide => hide_window(app.clone()),
         Action::Keep => keep_from_command(app),
+        Action::Unhide(arg) => {
+            let cfg = app.state::<SharedConfig>().get();
+            let entries = unhide_matches(&arg, &cfg.hide, &registered_vaults());
+            if entries.is_empty() {
+                eprintln!("hvelf: nothing hidden matches {arg:?}");
+            }
+            for e in entries {
+                unhide(app, &e);
+            }
+        }
         Action::Quit => app.exit(0),
         Action::QuickLaunch => {
             let cfg = app.state::<SharedConfig>().get();
@@ -2107,7 +2144,28 @@ fn single_instance_plugin() -> Option<tauri::plugin::TauriPlugin<tauri::Wry>> {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let initial = match parse_cli(&args) {
-        Ok(Cli::Run(a)) => a,
+        Ok(Cli::Run(a)) => {
+            // Checked here, before the running board is reached, so a name
+            // that matches nothing fails where it was typed.
+            if let Some(Action::Unhide(arg)) = &a {
+                let cfg = read_config();
+                if unhide_matches(arg, &cfg.hide, &registered_vaults()).is_empty() {
+                    eprintln!("hvelf: nothing hidden matches {arg:?}; `hvelf --hidden` lists what is");
+                    std::process::exit(1);
+                }
+            }
+            a
+        }
+        Ok(Cli::Hidden) => {
+            // The Hidden vaults menu as data: each `hide` entry and its label.
+            let cfg = read_config();
+            let items: Vec<serde_json::Value> = hidden_menu(&cfg.hide, &registered_vaults())
+                .into_iter()
+                .map(|(entry, label)| serde_json::json!({"entry": entry, "label": label}))
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&items).unwrap());
+            return;
+        }
         Ok(Cli::Help) => {
             println!("{USAGE}");
             return;
@@ -2247,6 +2305,13 @@ mod tests {
         assert_eq!(parse_cli(&args(&["--toggle"])), Ok(Cli::Run(Some(Action::Toggle))));
         assert_eq!(parse_cli(&args(&["--quick-launch"])), Ok(Cli::Run(Some(Action::QuickLaunch))));
         assert_eq!(parse_cli(&args(&["--keep"])), Ok(Cli::Run(Some(Action::Keep))));
+        assert_eq!(parse_cli(&args(&["--hidden"])), Ok(Cli::Hidden));
+        assert_eq!(parse_cli(&args(&["--unhide", "AL"])), Ok(Cli::Run(Some(Action::Unhide("AL".into())))));
+        assert_eq!(parse_cli(&args(&["--unhide", "/v/a b"])), Ok(Cli::Run(Some(Action::Unhide("/v/a b".into())))));
+        assert!(parse_cli(&args(&["--unhide"])).is_err());
+        assert!(parse_cli(&args(&["--unhide", "--quit"])).is_err());
+        assert!(parse_cli(&args(&["--unhide", ""])).is_err());
+        assert!(parse_cli(&args(&["--unhide", "AL", "--toggle"])).is_err());
         assert_eq!(parse_cli(&args(&["--capabilities"])), Ok(Cli::Capabilities));
         assert!(parse_cli(&args(&["--toggle", "--quit"])).is_err());
         assert!(parse_cli(&args(&["obsidian://open?vault=x; rm -rf ~"])).is_err());
@@ -2408,6 +2473,24 @@ mod tests {
         assert_eq!(ids, ["Lab-OS", "Research/AI/AL", "Admin", "Learning"]);
         assert_eq!(keep_tile(&order[1]).qualifier, "Research/AI");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unhide_matches_a_path_exactly_and_a_name_everywhere() {
+        let all = vec![
+            vault("1", "/v/research/notes", false),
+            vault("2", "/v/archive/notes", false),
+            vault("3", "/v/research/admin", false),
+        ];
+        let hide: Vec<String> = ["/v/research/notes", "/v/archive/notes", "/gone/Index", "admin", "/v/research/notes"]
+            .map(String::from)
+            .into();
+        assert_eq!(unhide_matches("notes", &hide, &all), ["/v/research/notes", "/v/archive/notes"]);
+        assert_eq!(unhide_matches("/v/archive/notes/", &hide, &all), ["/v/archive/notes"]);
+        assert_eq!(unhide_matches("Index", &hide, &all), ["/gone/Index"], "an entry Obsidian no longer knows");
+        assert_eq!(unhide_matches("ADMIN", &hide, &all), ["admin"], "names match as Obsidian matches them");
+        assert!(unhide_matches("nothing", &hide, &all).is_empty());
+        assert!(unhide_matches("/v/research", &hide, &all).is_empty(), "a path matches only its own entry");
     }
 
     #[test]

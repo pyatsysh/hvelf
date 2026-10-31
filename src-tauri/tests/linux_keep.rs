@@ -212,9 +212,11 @@ fn fixture_with(tag: &str, registry: Option<&str>, mapped: bool) -> Fixture {
     } else {
         Vec::new()
     };
+    // The mapped board starts with Lab-OS hidden, for the way back.
+    let hide: Vec<String> = if mapped { vec![vaults.join("mapped/Lab-OS").display().to_string()] } else { Vec::new() };
     let conf = serde_json::json!({
         "hotkey": "", "quickLaunch": "", "keep": "",
-        "exocortex": toml.display().to_string(), "vaultMap": map, "hideOnBlur": false,
+        "exocortex": toml.display().to_string(), "vaultMap": map, "hideOnBlur": false, "hide": hide,
     });
     std::fs::write(cfg.join("hvelf/config.json"), conf.to_string()).unwrap();
     let log = home.join("hvelf.log");
@@ -471,4 +473,13 @@ fn capture_files_refuses_and_never_invents_a_vault() {
     check_note(&got[0], "Research/AI/AL", title, "a mapped keep");
     assert_eq!(keeps_in(&mapped).len(), 1, "one keep, reached through the link only once");
     drop(front);
+
+    // The way back without a tray: --unhide reaches the running board, which
+    // takes the entry out of config.json and its own copy.
+    let hidden = |f: &Fixture| -> Vec<serde_json::Value> { serde_json::from_slice(&run(f, &["--hidden"]).stdout).unwrap() };
+    assert_eq!(hidden(&h).len(), 1);
+    assert_eq!(hidden(&h)[0]["label"], "Lab-OS (not in Obsidian)");
+    let out = run(&h, &["--unhide", "Lab-OS"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    wait_for("the entry to leave config.json", 10, || hidden(&h).is_empty());
 }

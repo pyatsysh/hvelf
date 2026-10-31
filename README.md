@@ -119,7 +119,11 @@ first run:
 - `groups` order the board. Vaults you do not list fall into a trailing group.
 - `hide` removes a vault's tile without touching Obsidian. The `×` on a tile
   adds the vault here for you, by its path, and Hidden vaults in the tray
-  menu takes it out again.
+  menu takes it out again. Where no tray shows (GNOME without the
+  AppIndicator extension), `hvelf --hidden` lists the hidden vaults and
+  `hvelf --unhide <name or path>` puts them back: a path its own entry, a
+  name every entry whose vault has that name. A name that matches nothing
+  is refused with exit status 1.
 - `deepLinks` make a tile open a specific note, via `&file=` in the URI.
 - `keep` is the capture hotkey (default `alt+k`, empty to disable) and
   `exocortex` the registry it reads, see below.
@@ -243,7 +247,9 @@ an entry of Obsidian's registry whose folder is gone is marked missing
 instead of being handed to Obsidian.
 
 A running board takes commands from a second invocation over D-Bus:
-`hvelf --toggle`, `--show`, `--hide`, `--quick-launch`, `--keep` and `--quit`. Bind
+`hvelf --toggle`, `--show`, `--hide`, `--quick-launch`, `--keep`,
+`--unhide <name or path>` and `--quit`; `hvelf --hidden` prints the hidden
+vaults without one. Bind
 `hvelf --toggle` to a key in the desktop's own settings (GNOME: Settings,
 Keyboard, View and Customise Shortcuts, Custom Shortcuts; KDE: System
 Settings, Shortcuts, Add Command). GNOME binds Alt plus the key above Tab to

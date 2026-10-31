@@ -252,3 +252,40 @@ fn the_vault_map_dedups_links_and_marks_bounded_unknown_and_missing() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("no vault map"));
     assert_eq!(tiles(&out).len(), 4, "all four registry entries, the missing one marked");
 }
+
+/// The way back without a tray: `--hidden` lists the hidden vaults as the
+/// tray menu labels them, and `--unhide` refuses, where it was typed, a name
+/// that matches nothing, before any board is reached.
+#[test]
+fn hidden_lists_the_way_back_and_unhide_refuses_what_matches_nothing() {
+    let home = root("hidden");
+    let cfg = home.join("cfg");
+    let bin = home.join("bin");
+    fake_bin(&bin, "xdg-mime", "exit 0");
+    write_registry(&cfg.join("obsidian/obsidian.json"), &home);
+    std::fs::create_dir_all(cfg.join("hvelf")).unwrap();
+    let archive = format!("{}/archive/notes", home.display());
+    let conf = serde_json::json!({"hide": [archive, "/gone/Index"], "vaultMap": []});
+    std::fs::write(cfg.join("hvelf/config.json"), conf.to_string()).unwrap();
+    let env = [("HOME", home.as_path()), ("XDG_CONFIG_HOME", cfg.as_path()), ("PATH", bin.as_path())];
+
+    let out = hvelf(&["--hidden"], &env, &[]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let items: Vec<serde_json::Value> = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(
+        items,
+        [
+            serde_json::json!({"entry": "/gone/Index", "label": "Index (not in Obsidian)"}),
+            serde_json::json!({"entry": archive, "label": "notes (archive)"}),
+        ]
+    );
+
+    let out = hvelf(&["--unhide", "nothing-hidden"], &env, &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("nothing hidden matches"));
+    let out = hvelf(&["--unhide"], &env, &[]);
+    assert_eq!(out.status.code(), Some(2));
+    // Nothing was touched.
+    let after: serde_json::Value = serde_json::from_slice(&std::fs::read(cfg.join("hvelf/config.json")).unwrap()).unwrap();
+    assert_eq!(after["hide"].as_array().unwrap().len(), 2);
+}
