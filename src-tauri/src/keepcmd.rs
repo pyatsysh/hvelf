@@ -141,7 +141,8 @@ pub fn file(cmd: &[String], vault: &str, note: &str, body: &str, timeout: Durati
 }
 
 /// The program a command runs, found as the shell would: a path as given,
-/// else the first executable of that name on PATH.
+/// else the first executable of that name on PATH. Asked on Linux only.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn find_program(prog: &str, path_var: Option<&str>) -> Option<PathBuf> {
     if prog.is_empty() {
         return None;
@@ -157,6 +158,7 @@ pub fn find_program(prog: &str, path_var: Option<&str>) -> Option<PathBuf> {
         .find(|p| executable(p))
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn executable(p: &Path) -> bool {
     #[cfg(unix)]
     {
