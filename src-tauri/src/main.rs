@@ -571,6 +571,8 @@ fn vaults_from(reg: ObsidianRegistry) -> Vec<Vault> {
 struct FocusHistory(std::sync::Arc<std::sync::Mutex<HashMap<String, u64>>>);
 
 impl FocusHistory {
+    // macOS samples no focused window, so only the stamps are read there.
+    #[cfg_attr(target_os = "macos", allow(dead_code))]
     fn note(&self, vault: String) {
         self.0.lock().unwrap().insert(vault, now_ms());
     }
@@ -579,6 +581,7 @@ impl FocusHistory {
     }
 }
 
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -588,6 +591,7 @@ fn now_ms() -> u64 {
 
 /// Extract the vault name from an Obsidian window title of the form
 /// "<note> - <vault> - Obsidian <version>".
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn vault_from_title(title: &str) -> Option<String> {
     let parts: Vec<&str> = title.split(" - ").collect();
     if parts.len() >= 3 && parts.last().map_or(false, |l| l.starts_with("Obsidian")) {
@@ -1246,6 +1250,7 @@ struct KeepState(Arc<Mutex<Option<Pending>>>);
 
 /// One capture at a time: the chord and `hvelf --keep` run on different
 /// threads, and a second capture must see the first one's pending note.
+#[cfg(any(windows, target_os = "linux"))]
 static KEEP_TURN: Mutex<()> = Mutex::new(());
 
 /// What a capture found, before the board asks where it goes.
@@ -1261,6 +1266,8 @@ struct Captured {
 }
 
 enum Route {
+    // Only a capture (Windows, Linux) files where the banner says.
+    #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
     Preselected,
     Vault(String),
     Unrouted,
