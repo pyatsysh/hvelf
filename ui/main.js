@@ -9,7 +9,9 @@ const hintTextEl = document.getElementById("hinttext");
 const hintEl = document.getElementById("hint");
 
 const HINT_BOARD = "1–9 launch · Enter first match · Ctrl+Q quit";
-const HINT_KEEP = "Enter or the chord keeps into the lit vault · 1–9 pick another · Esc parks it unrouted";
+// What Esc does comes from the board: it parks a capture unrouted, keeps it in
+// the fallback vault, or, once keep has refused it, drops it.
+const hintKeep = (esc) => `Enter or the chord keeps into the lit vault · 1–9 pick another · Esc ${esc || "parks it unrouted"}`;
 
 // Failures come back as {ok:false, code, message, feature}; show the reason,
 // never a silent no-op. Text only: names and paths are data, not markup.
@@ -94,7 +96,7 @@ function renderKeepbar() {
   if (pending.vault.bounded) meta.appendChild(el("bound", " bounded"));
   keepbarEl.replaceChildren(el("kword", "keep"), el("kprev", pending.preview || "(whitespace)"), meta);
   keepbarEl.style.display = "flex";
-  hintTextEl.textContent = HINT_KEEP;
+  hintTextEl.textContent = hintKeep(pending.esc);
 }
 
 function render() {
@@ -206,7 +208,8 @@ function pick(t) {
   }
 }
 
-// Esc in keep mode is "decide later", never "discard".
+// Esc in keep mode is "decide later", never "discard", until keep has refused
+// the capture: then nothing may be written around the refusal, so it drops it.
 async function dismiss() {
   filterEl.value = "";
   clearNotice();

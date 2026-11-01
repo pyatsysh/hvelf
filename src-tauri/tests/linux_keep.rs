@@ -3,11 +3,16 @@
 //!
 //!     HVELF_X11_TEST=1 xvfb-run -n 171 dbus-run-session -- cargo test --test linux_keep
 //!
+//! With HVELF_LABOS_KERNEL naming a Lab-OS kernel tree (bin/keep and
+//! runtime/, 0.2.0-rc.7 or later), captures are also filed through that real
+//! `keep`, whose private-name guard for synced vaults then decides.
+//!
 //! The test plays the window manager (it publishes `_NET_ACTIVE_WINDOW`) and
 //! the application in front, whose PRIMARY selection hvelf reads; it serves
 //! that selection itself, INCR included for a large one. `hvelf --keep` stands
 //! in for the chord, so no key is injected. Fixtures only: no real vault,
-//! registry or desktop is read or written.
+//! registry or desktop is read or written, and hvelf runs with the system's
+//! PATH alone, so no installed `keep` or `exo` can be reached.
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
@@ -24,6 +29,14 @@ use x11rb::protocol::xproto::{
 };
 use x11rb::protocol::Event;
 use x11rb::wrapper::ConnectionExt as _;
+
+/// The tests share one display and one session bus, where only one board may
+/// run: they take turns, whatever the test harness's thread count.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn enabled() -> bool {
     if std::env::var("HVELF_X11_TEST").is_err() || std::env::var("DISPLAY").is_err() {
@@ -160,6 +173,8 @@ struct Fixture {
     cfg: PathBuf,
     vaults: PathBuf,
     log: PathBuf,
+    /// More environment for hvelf, and so for the keep command it runs.
+    env: Vec<(String, String)>,
 }
 
 /// A fake `exo` printing a labos-vault-map/v1 map of `root`: Research/AI/AL
@@ -193,7 +208,8 @@ fn fixture(tag: &str, registry: Option<&str>) -> Fixture {
 
 /// With `mapped`, the vaults come from a fake `exo vaults --json`; without,
 /// from the registry file, and no map command is configured at all, so the
-/// real `exo` is never run.
+/// real `exo` is never run. hvelf writes these keeps itself (an empty
+/// keepCommand), so the real `keep` is never run either.
 fn fixture_with(tag: &str, registry: Option<&str>, mapped: bool) -> Fixture {
     let home = root(tag);
     let cfg = home.join("cfg é");
@@ -216,20 +232,32 @@ fn fixture_with(tag: &str, registry: Option<&str>, mapped: bool) -> Fixture {
     let hide: Vec<String> = if mapped { vec![vaults.join("mapped/Lab-OS").display().to_string()] } else { Vec::new() };
     let conf = serde_json::json!({
         "hotkey": "", "quickLaunch": "", "keep": "",
-        "exocortex": toml.display().to_string(), "vaultMap": map, "hideOnBlur": false, "hide": hide,
+        "exocortex": toml.display().to_string(), "vaultMap": map, "keepCommand": [], "hideOnBlur": false, "hide": hide,
     });
     std::fs::write(cfg.join("hvelf/config.json"), conf.to_string()).unwrap();
     let log = home.join("hvelf.log");
-    Fixture { home, cfg, vaults, log }
+    Fixture { home, cfg, vaults, log, env: Vec::new() }
+}
+
+/// The binary under test: this build's, or HVELF_BIN, so the same checks can
+/// run against a packaged one.
+fn hvelf_bin() -> PathBuf {
+    std::env::var("HVELF_BIN").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(env!("CARGO_BIN_EXE_hvelf")))
 }
 
 fn command(f: &Fixture) -> Command {
-    let mut c = Command::new(env!("CARGO_BIN_EXE_hvelf"));
+    let mut c = Command::new(hvelf_bin());
     c.env_clear();
-    for k in ["DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "PATH", "LD_LIBRARY_PATH"] {
+    for k in ["DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "LD_LIBRARY_PATH"] {
         if let Ok(v) = std::env::var(k) {
             c.env(k, v);
         }
+    }
+    // The system's own directories only: an installed Lab-OS puts `keep` and
+    // `exo` in ~/.local/bin and /usr/local/bin, and no test may reach them.
+    c.env("PATH", "/usr/bin:/bin");
+    for (k, v) in &f.env {
+        c.env(k, v);
     }
     c.env("HOME", &f.home)
         .env("XDG_CONFIG_HOME", &f.cfg)
@@ -374,6 +402,7 @@ fn check_note(path: &Path, vault: &str, title: &str, text: &str) {
 /// reading anything and creates nothing.
 #[test]
 fn capture_files_refuses_and_never_invents_a_vault() {
+    let _turn = serial();
     if !enabled() {
         return;
     }
@@ -482,4 +511,251 @@ fn capture_files_refuses_and_never_invents_a_vault() {
     let out = run(&h, &["--unhide", "Lab-OS"]);
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     wait_for("the entry to leave config.json", 10, || hidden(&h).is_empty());
+}
+
+// ------------------------------------------- through Lab-OS's own `keep`
+
+/// A Lab-OS kernel tree to run the real `keep` from: HVELF_LABOS_KERNEL,
+/// holding bin/keep and runtime/synced.py (Lab-OS 0.2.0-rc.7 and later). Unset,
+/// the test is skipped; set to anything else, it fails.
+fn labos_kernel() -> Option<PathBuf> {
+    let k = PathBuf::from(std::env::var("HVELF_LABOS_KERNEL").ok()?);
+    assert!(
+        k.join("bin/keep").is_file() && k.join("runtime/synced.py").is_file(),
+        "HVELF_LABOS_KERNEL={} holds no bin/keep with runtime/synced.py",
+        k.display()
+    );
+    Some(k)
+}
+
+/// A vault root like the native one, Lab-OS the fallback, Research/AI/AL with
+/// its link AL, and a bounded Admin; `keep`'s own instance table for it; a
+/// workspace catalogue with one private entry, whose id and name are private
+/// territory; the folders in `synced` as the synced folder pairs. The board
+/// reads the kernel's own vault map of that table, and files through the
+/// kernel's `keep`. HOME is the fixture's, so no real Nextcloud pairs count.
+fn keep_fixture(tag: &str, kernel: &Path, synced: &[&str]) -> Fixture {
+    let home = root(tag);
+    let cfg = home.join("cfg é");
+    let vaults = home.join("Vaults root");
+    for d in ["Lab-OS", "Research/AI/AL", "Admin"] {
+        std::fs::create_dir_all(vaults.join(d)).unwrap();
+    }
+    std::os::unix::fs::symlink(vaults.join("Research/AI/AL"), vaults.join("AL")).unwrap();
+    let toml = home.join("exocortex.toml");
+    std::fs::write(
+        &toml,
+        format!("[vaults]\nroot = {:?}\nbounded = [\"Admin\"]\nfallback = \"Lab-OS\"\nexcluded = []\n", vaults.display().to_string()),
+    )
+    .unwrap();
+    let catalogue = home.join("workspaces.json");
+    let entry = serde_json::json!({"id": "zetamatter", "name": "Zeta Matter", "lifecycle": "active", "access_scope": "admin", "category": "admin"});
+    std::fs::write(&catalogue, serde_json::json!({"schema": "labos-workspace-catalogue/v1", "entries": [entry]}).to_string()).unwrap();
+    let map = home.join("map.py");
+    std::fs::write(
+        &map,
+        "import importlib.util, json, sys, tomllib\n\
+         spec = importlib.util.spec_from_file_location('labos_vaults', sys.argv[1])\n\
+         v = importlib.util.module_from_spec(spec)\n\
+         spec.loader.exec_module(v)\n\
+         with open(sys.argv[2], 'rb') as fh:\n    print(json.dumps(v.from_config(tomllib.load(fh)).describe()))\n",
+    )
+    .unwrap();
+    let s = |p: &Path| p.display().to_string();
+    std::fs::create_dir_all(cfg.join("hvelf")).unwrap();
+    let conf = serde_json::json!({
+        "hotkey": "", "quickLaunch": "", "keep": "", "exocortex": s(&toml),
+        "vaultMap": ["/usr/bin/python3", s(&map), s(&kernel.join("runtime/vaults.py")), s(&toml)],
+        "keepCommand": ["/usr/bin/python3", s(&kernel.join("bin/keep"))],
+        "hideOnBlur": false, "hide": [],
+    });
+    std::fs::write(cfg.join("hvelf/config.json"), conf.to_string()).unwrap();
+    let pairs: Vec<String> = synced.iter().map(|d| s(&vaults.join(d)).trim_end_matches('/').to_string()).collect();
+    let env = vec![
+        ("EXO_CONFIG".to_string(), s(&toml)),
+        ("LABOS_CATALOGUE".to_string(), s(&catalogue)),
+        ("LABOS_SYNC_PAIRS".to_string(), serde_json::to_string(&pairs).unwrap()),
+    ];
+    let log = home.join("hvelf.log");
+    Fixture { home, cfg, vaults, log, env }
+}
+
+/// A note `keep` wrote for a capture: its own format and id, the capture's
+/// vault and passage verbatim, and where it came from in source_note.
+fn check_kept(path: &Path, vault: &str, title: &str, text: &str) {
+    let note = std::fs::read_to_string(path).unwrap();
+    let (meta, body) = split(&note);
+    let get = |k: &str| meta.iter().find(|(m, _)| m == k).map(|(_, v)| v.clone());
+    let keys: Vec<&str> = meta.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["id", "ts", "source", "vault", "app", "source_note", "sha256"], "keep's own format");
+    let id = get("id").unwrap();
+    assert_eq!(path.file_name().unwrap().to_string_lossy(), format!("{id}.md"));
+    assert_eq!(get("source").as_deref(), Some("selection"));
+    assert_eq!(get("vault").as_deref(), Some(vault));
+    assert_eq!(get("app").as_deref(), Some("terminal"), "keep's own value for text it is handed");
+    let note_value: String = serde_json::from_str(&get("source_note").unwrap()).unwrap();
+    assert_eq!(note_value, format!("hvelf capture from {}: {title}", this_exe()));
+    let want = if text.ends_with('\n') { text.to_string() } else { format!("{text}\n") };
+    assert_eq!(body, want, "body verbatim");
+    let sha: String = Sha256::digest(want.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+    assert_eq!(get("sha256"), Some(sha));
+}
+
+/// Each board starts its log afresh: keep a scenario's beside the fixture.
+fn save_log(f: &Fixture, scenario: &str) {
+    let _ = std::fs::copy(&f.log, f.home.join(format!("hvelf {scenario}.log")));
+}
+
+/// Everything under the vault root that is not a folder: notes, and any
+/// half-written `.part`.
+fn files_in(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            match e.file_type() {
+                Ok(t) if t.is_dir() => out.extend(files_in(&p)),
+                Ok(t) if t.is_symlink() => {}
+                _ => out.push(p),
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Captures go through Lab-OS's own `keep` (rc.7's, with the private-name
+/// guard for synced vaults, FA-013). With the whole vault root a synced pair:
+/// a plain passage is filed into Lab-OS in keep's format; a passage naming
+/// the private entry is refused there and in Research/AI/AL, the refusal
+/// keeps it on the board (the chord again is refused again), and nothing at
+/// all is written, not even to the unrouted folder; the same passage is filed
+/// into the bounded Admin, which never syncs. With no synced pair, it is filed
+/// into Lab-OS. hvelf's log never holds the private name.
+#[test]
+fn capture_through_keep_is_refused_in_a_synced_vault_and_filed_elsewhere() {
+    let _turn = serial();
+    if !enabled() {
+        return;
+    }
+    let Some(kernel) = labos_kernel() else {
+        eprintln!("skipped: set HVELF_LABOS_KERNEL to a Lab-OS kernel tree holding bin/keep and runtime/synced.py");
+        return;
+    };
+    let f = keep_fixture("guard", &kernel, &[""]);
+    let v = f.vaults.clone();
+    let private = "notes on the Zetamatter hearing\nsecond line, plain";
+    let plain = "a plain note é \"q\"\n\tindented";
+    let to_lab = "draft - Lab-OS - Obsidian v1.6.7";
+
+    // Filing is through keep, which is there.
+    {
+        let board = Board::start(&f);
+        let caps: Vec<serde_json::Value> = serde_json::from_slice(&run(&f, &["--capabilities"]).stdout).unwrap();
+        let get = |name: &str| caps.iter().find(|c| c["capability"] == name).unwrap().clone();
+        assert_eq!(get("keep-filing")["state"], "available", "{}", get("keep-filing"));
+        assert_eq!(get("vault-map")["state"], "available", "{}", get("vault-map"));
+        assert_eq!(get("keep-capture")["state"], "available", "{}", get("keep-capture"));
+
+        // A plain passage into the synced Lab-OS: filed, in keep's format.
+        let front = Front::new(to_lab, Some(plain));
+        board.keep();
+        board.wait_log("chars from");
+        assert!(board.log().contains("Lab-OS is lit;"), "{}", board.log());
+        board.keep();
+        let got = wait_files(&v.join("Lab-OS/keeps"), 1);
+        check_kept(&got[0], "Lab-OS", to_lab, plain);
+        board.wait_log("kept \u{2192} Lab-OS");
+        board.wait_log(&format!("filed by `/usr/bin/python3 {}` into Lab-OS as ", kernel.join("bin/keep").display()));
+        drop(front);
+    }
+    save_log(&f, "1 plain into Lab-OS");
+    let filed = files_in(&v);
+    assert_eq!(filed.len(), 1, "{filed:?}");
+
+    // The private name into Lab-OS: refused, kept on the board, refused again
+    // on the chord, and nothing written anywhere.
+    {
+        let board = Board::start(&f);
+        let front = Front::new(to_lab, Some(private));
+        board.keep();
+        board.wait_log("chars from");
+        board.keep();
+        board.wait_log("chars not filed into Lab-OS: refused: this keep would be written into");
+        board.keep();
+        wait_for("the second refusal", 10, || board.log().matches("chars not filed into Lab-OS").count() >= 2);
+        let log = board.log();
+        assert!(log.contains("names private territory (text: 1 private identifier and 0 private paths on line 1)"), "{log}");
+        assert!(!log.to_lowercase().contains("zetamatter"), "the private name is in hvelf's log:\n{log}");
+        assert!(!log.contains("kept \u{2192}"), "{log}");
+        drop(front);
+    }
+    save_log(&f, "2 private into Lab-OS");
+    // Into Research/AI/AL, synced too: refused.
+    {
+        let board = Board::start(&f);
+        let front = Front::new("notes - AL - Obsidian v1.6.7", Some(private));
+        board.keep();
+        board.wait_log("Research/AI/AL is lit;");
+        board.keep();
+        board.wait_log("chars not filed into Research/AI/AL: refused");
+        drop(front);
+    }
+    save_log(&f, "3 private into Research-AI-AL");
+    assert_eq!(files_in(&v), filed, "refusals write nothing at all, no .part and no unrouted note");
+    assert!(!v.join("Lab-OS/keeps/unrouted").exists());
+
+    // Into the bounded Admin, inside the pair but never synced: filed.
+    {
+        let board = Board::start(&f);
+        let title = "notes - Admin - Obsidian v1.6.7";
+        let front = Front::new(title, Some(private));
+        board.keep();
+        board.wait_log("Admin is lit;");
+        board.keep();
+        let got = wait_files(&v.join("Admin/keeps"), 1);
+        check_kept(&got[0], "Admin", title, private);
+        board.wait_log("kept \u{2192} Admin");
+        assert!(!board.log().to_lowercase().contains("zetamatter"), "{}", board.log());
+        drop(front);
+    }
+    save_log(&f, "4 private into Admin");
+
+    // No synced pair at all: the same passage is filed into Lab-OS.
+    let g = keep_fixture("unsynced", &kernel, &[]);
+    let board = Board::start(&g);
+    let front = Front::new(to_lab, Some(private));
+    board.keep();
+    board.wait_log("chars from");
+    board.keep();
+    let got = wait_files(&g.vaults.join("Lab-OS/keeps"), 1);
+    check_kept(&got[0], "Lab-OS", to_lab, private);
+    drop(front);
+    drop(board);
+    save_log(&g, "5 private into an unsynced Lab-OS");
+}
+
+/// A keep command that is not there: the chord captures nothing, says why,
+/// and nothing is written; the capability says so before any chord.
+#[test]
+fn a_missing_keep_command_captures_nothing() {
+    let _turn = serial();
+    if !enabled() {
+        return;
+    }
+    let f = fixture_with("nokeep", None, true);
+    let conf_path = f.cfg.join("hvelf/config.json");
+    let mut conf: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&conf_path).unwrap()).unwrap();
+    conf["keepCommand"] = serde_json::json!(["no-such-keep-command"]);
+    std::fs::write(&conf_path, conf.to_string()).unwrap();
+    let board = Board::start(&f);
+    let caps: Vec<serde_json::Value> = serde_json::from_slice(&run(&f, &["--capabilities"]).stdout).unwrap();
+    let kf = caps.iter().find(|c| c["capability"] == "keep-filing").unwrap();
+    assert_eq!(kf["state"], "unavailable", "{kf}");
+    let front = Front::new("draft - AL - Obsidian v1.6.7", Some("text"));
+    board.keep();
+    board.wait_log("no-such-keep-command is not on PATH (keepCommand in config.json), so nothing was captured");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(keeps_in(&f.vaults).is_empty(), "nothing written");
+    drop(front);
 }

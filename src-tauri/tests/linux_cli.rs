@@ -289,3 +289,32 @@ fn hidden_lists_the_way_back_and_unhide_refuses_what_matches_nothing() {
     let after: serde_json::Value = serde_json::from_slice(&std::fs::read(cfg.join("hvelf/config.json")).unwrap()).unwrap();
     assert_eq!(after["hide"].as_array().unwrap().len(), 2);
 }
+
+/// How keeps are filed: by `keep` when it is on PATH, so its checks apply;
+/// refused rather than written around it when it is not; and by hvelf itself,
+/// without those checks, when keepCommand is empty, which the record says.
+#[test]
+fn keep_filing_follows_the_keep_command() {
+    let home = root("filing");
+    write_registry(&home.join(".config/obsidian/obsidian.json"), &home);
+    let with = home.join("bin with keep");
+    fake_bin(&with, "keep", "exit 0");
+    let without = home.join("bin-without");
+    std::fs::create_dir_all(&without).unwrap();
+
+    let c = caps(&hvelf(&["--capabilities"], &[("HOME", home.as_path()), ("PATH", with.as_path())], &[]));
+    assert_eq!(c["keep-filing"].0, "available", "{:?}", c["keep-filing"]);
+    assert!(c["keep-filing"].1.contains(&format!("{}/keep", with.display())), "{:?}", c["keep-filing"]);
+
+    let c = caps(&hvelf(&["--capabilities"], &[("HOME", home.as_path()), ("PATH", without.as_path())], &[]));
+    assert_eq!(c["keep-filing"].0, "unavailable", "{:?}", c["keep-filing"]);
+    assert!(c["keep-filing"].1.contains("captures nothing"), "{:?}", c["keep-filing"]);
+
+    let cfg = home.join("cfg");
+    std::fs::create_dir_all(cfg.join("hvelf")).unwrap();
+    std::fs::write(cfg.join("hvelf/config.json"), r#"{"keepCommand":[]}"#).unwrap();
+    let env = [("HOME", home.as_path()), ("XDG_CONFIG_HOME", cfg.as_path()), ("PATH", with.as_path())];
+    let c = caps(&hvelf(&["--capabilities"], &env, &[]));
+    assert_eq!(c["keep-filing"].0, "degraded", "{:?}", c["keep-filing"]);
+    assert!(c["keep-filing"].1.contains("private-name guard"), "{:?}", c["keep-filing"]);
+}

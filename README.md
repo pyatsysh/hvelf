@@ -131,13 +131,17 @@ first run:
   With one, the board shows one tile per vault of the map and the keep chord
   files by the map's ids, see below; empty, the board is Obsidian's registry
   alone.
+- `keepCommand` is the command that files a capture: Lab-OS's `keep`, handed
+  the text on stdin, so the checks `keep` makes before writing apply to
+  captures too, see below. Empty, hvelf writes the note itself, without those
+  checks: for a machine without Lab-OS.
 - On Linux the defaults differ: `hotkey` is `ctrl+alt+grave`, since GNOME
   binds Alt and the key above Tab to switching an application's windows
   (`alt+grave` still works once that binding is freed); `quickLaunch` is
   `ctrl+alt+1`, since GNOME Terminal takes `alt+1` for its first tab (set
   `alt+1` to take it from the terminal); `vaultMap` is
-  `["exo", "vaults", "--json"]`; `exocortex` is Lab-OS's
-  `/opt/labos/current/kernel/instance/exocortex.toml`.
+  `["exo", "vaults", "--json"]`; `keepCommand` is `["keep"]`; `exocortex` is
+  Lab-OS's `/opt/labos/current/kernel/instance/exocortex.toml`.
 - Entries in `hide`, `groups` and `deepLinks` name a vault by its name, or by
   its full path, which is the only way to name one of two vaults that share a
   name (`"hide": ["D:\\delme\\moreland-dispute"]`).
@@ -163,7 +167,9 @@ title if any, else the one you last kept into. `Enter` or the chord again
 files it there, `1`–`9` or a click files it into another vault, `Esc` parks
 it in the fallback vault's `keeps/unrouted/` to decide later. A capture is
 never discarded: losing the board also parks it. Focus returns to the app
-you were in and a toast confirms `kept → vault`.
+you were in and a toast confirms `kept → vault`. Filed through Lab-OS's
+`keep` instead, as on Linux by default, `Esc` and refusals work as described
+under the vault map below.
 
 On Linux (an X11 session) hvelf reads the PRIMARY selection, the text last
 highlighted on the display, from the program holding it, as any X client
@@ -183,6 +189,20 @@ name the map lists for a vault (a link such as `AL`, an old name) selects
 it from a window title like its own name. Bounded vaults are marked, the
 fallback is the map's, and exocortex.toml is not read. A map that cannot be
 read leaves nothing to file into, and the chord says why.
+
+With a `keepCommand` (the Linux default, Lab-OS's `keep`), hvelf writes no
+note itself. The choice goes to `keep --stdin --vault <id> --source-note
+<program and window title>`, which applies its own checks and writes the note
+in its own format (`source: selection`, `app: terminal`, where it came from in
+`source_note`). `Esc` files into the fallback vault the same way, since `keep`
+files nothing outside a vault. What `keep` refuses, such as a passage naming
+private territory on its way into a vault in a synced folder pair, stays on
+the board with `keep`'s reason, which gives counts and line numbers, never the
+names: pick another vault (a bounded one never syncs), or press `Esc`, which
+now drops it. Nothing is written around a refusal, not even to
+`keeps/unrouted/`, and the text stays where it was selected. A `keepCommand`
+that is not on PATH makes the chord capture nothing, and
+`hvelf --capabilities` reports the route as `keep-filing`.
 
 Without a map, vaults are the subfolders of a root named in a small registry
 file:

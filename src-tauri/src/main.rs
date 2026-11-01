@@ -14,6 +14,7 @@ mod capture;
 #[cfg(target_os = "macos")]
 mod hotkey_macos;
 mod keep;
+mod keepcmd;
 #[cfg(target_os = "linux")]
 mod linux;
 mod vaultmap;
@@ -80,6 +81,13 @@ struct Config {
     /// one, the board and the keep chord take their vaults from it; empty,
     /// the board shows Obsidian's registry alone and keeps go by `exocortex`.
     vault_map: Vec<String>,
+    /// The command that files a capture: Lab-OS's `keep`, given the passage
+    /// on stdin and `--stdin --vault <id> --source-note <where from>`, so its
+    /// checks before writing (the private-name guard for synced vaults among
+    /// them) apply to captures too, and what it refuses is never written.
+    /// Empty, hvelf writes the note itself, without those checks: for a
+    /// machine without Lab-OS.
+    keep_command: Vec<String>,
     hide_on_blur: bool,
     hide: Vec<String>,
     groups: Vec<Group>,
@@ -101,6 +109,7 @@ impl Default for Config {
             keep: "alt+k".into(),
             exocortex: keep::DEFAULT_REGISTRY.into(),
             vault_map: default_vault_map(),
+            keep_command: default_keep_command(),
             hide_on_blur: true,
             hide: Vec::new(),
             groups: Vec::new(),
@@ -135,6 +144,15 @@ fn default_quick_launch() -> &'static str {
 fn default_vault_map() -> Vec<String> {
     if cfg!(target_os = "linux") {
         ["exo", "vaults", "--json"].map(String::from).to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Lab-OS's `keep` files captures on Linux; elsewhere hvelf writes them.
+fn default_keep_command() -> Vec<String> {
+    if cfg!(target_os = "linux") {
+        vec!["keep".to_string()]
     } else {
         Vec::new()
     }
@@ -1211,6 +1229,7 @@ fn capabilities(runtime: State<RuntimeCaps>, cfg: State<SharedConfig>, maps: Sta
         out.extend(linux::capabilities());
         out.push(map_capability(&cfg, &map));
         out.push(keep_capability(&cfg, map));
+        out.push(filing_capability(&cfg));
     }
     out.extend(runtime.0.lock().unwrap().iter().cloned());
     out
@@ -1243,6 +1262,12 @@ struct Pending {
     exo: keep::Exocortex,
     /// Window to give the focus back to once the note is filed.
     source: isize,
+    /// The command that files it (keepCommand when it was captured); empty,
+    /// hvelf writes the note itself.
+    via: Vec<String>,
+    /// That command has refused it (or failed) once: it stays on the board,
+    /// and Esc now drops it instead of parking it.
+    refused: bool,
 }
 
 #[derive(Clone, Default)]
@@ -1304,6 +1329,8 @@ struct KeepInfo {
     vault: KeepTile,
     vaults: Vec<KeepTile>,
     app: String,
+    /// What Esc does with it, for the hint under the board.
+    esc: String,
 }
 
 /// A vault in keep mode: its id, which is what the board files by, and the
@@ -1334,17 +1361,50 @@ fn keep_pending(keep: State<KeepState>) -> Option<KeepInfo> {
             .unwrap_or_else(|| keep_tile(&keep::Target { id: p.vault.clone(), names: vec![], bounded: false })),
         vaults: p.vaults.iter().map(keep_tile).collect(),
         app: p.app.clone(),
+        esc: match filing_for(&p.via, None, p.refused, &p.exo.fallback) {
+            Filing::Write => "parks it unrouted".into(),
+            Filing::Keep { vault, .. } => format!("keeps it in {vault}"),
+            Filing::Drop => "drops it; nothing is filed".into(),
+        },
     })
 }
 
-/// From the board: a named vault, or none for the unrouted folder.
+/// How a pending capture is filed for a choice on the board: a vault, or
+/// none (Esc). Written by hvelf when no keep command is configured; else
+/// through it, Esc parking the capture in the fallback vault, as `keep`
+/// itself files what has no vault of its own; and after that command has
+/// refused it, Esc drops it, since nothing may be written around a refusal.
+#[derive(Debug, PartialEq)]
+enum Filing {
+    Write,
+    Keep { vault: String, parked: bool },
+    Drop,
+}
+
+fn filing_for(via: &[String], chosen: Option<&str>, refused: bool, fallback: &str) -> Filing {
+    match chosen {
+        _ if via.is_empty() => Filing::Write,
+        Some(v) => Filing::Keep { vault: v.to_string(), parked: false },
+        None if refused => Filing::Drop,
+        None => Filing::Keep { vault: fallback.to_string(), parked: true },
+    }
+}
+
+/// From the board: a named vault, or none (Esc). Filed off the main thread,
+/// since filing may wait on another program, and in turn with the chord,
+/// which files a pending capture too.
 #[tauri::command]
 fn keep_file(app: AppHandle, keep: State<KeepState>, vault: Option<String>) {
     let route = match vault {
         Some(v) => Route::Vault(v),
         None => Route::Unrouted,
     };
-    file_pending(&app, keep.inner(), route, true);
+    let keep = keep.inner().clone();
+    std::thread::spawn(move || {
+        #[cfg(any(windows, target_os = "linux"))]
+        let _turn = KEEP_TURN.lock().unwrap_or_else(|e| e.into_inner());
+        file_pending(&app, &keep, route, true);
+    });
 }
 
 fn file_pending(app: &AppHandle, keep: &KeepState, route: Route, restore_focus: bool) {
@@ -1356,6 +1416,19 @@ fn file_pending(app: &AppHandle, keep: &KeepState, route: Route, restore_focus: 
         Route::Vault(v) => Some(v),
         Route::Unrouted => None,
     };
+    match filing_for(&p.via, chosen.as_deref(), p.refused, &p.exo.fallback) {
+        Filing::Write => {}
+        Filing::Keep { vault, parked } => return file_through_keep(app, keep, p, vault, parked, restore_focus),
+        Filing::Drop => {
+            eprintln!("hvelf: keep: dropped after a refusal; nothing was filed");
+            hide_window(app.clone());
+            if restore_focus {
+                focus_window(p.source);
+            }
+            toast(app, &format!("nothing filed; the text is still in {}", p.app));
+            return;
+        }
+    }
     let unrouted = keep::unrouted_path(&p.exo.root, &p.exo.fallback, &p.id);
     let path = match &chosen {
         Some(v) => keep::keep_path(&p.exo.root, v, &p.month, &p.id),
@@ -1398,6 +1471,58 @@ fn file_pending(app: &AppHandle, keep: &KeepState, route: Route, restore_focus: 
         focus_window(p.source);
     }
     toast(app, &format!("kept \u{2192} {label}"));
+}
+
+/// The wait for the keep command: room for a slow start, not for a hang.
+const KEEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// File through the keep command. What it files is its note, in its format;
+/// what it refuses, or cannot file, stays on the board with the reason, and
+/// nothing is written anywhere else, not even to the unrouted folder, which
+/// lies in a vault too.
+fn file_through_keep(app: &AppHandle, keep: &KeepState, mut p: Pending, vault: String, parked: bool, restore_focus: bool) {
+    let note = keepcmd::source_note(&p.app, &p.title, p.url.as_deref(), parked);
+    let chars = p.body.chars().count();
+    let (code, why) = match keepcmd::file(&p.via, &vault, &note, &p.body, KEEP_TIMEOUT) {
+        keepcmd::Outcome::Kept { vault: filed, id, path } => {
+            if !parked {
+                save_persisted(&Persisted {
+                    last_keep_vault: vault.clone(),
+                });
+            }
+            // Names and a count only: the text itself never goes to a log.
+            eprintln!(
+                "hvelf: keep: {chars} chars filed by `{}` into {filed}{}{}",
+                p.via.join(" "),
+                id.map(|i| format!(" as {i}")).unwrap_or_default(),
+                path.map(|x| format!(" at {}", x.display())).unwrap_or_default()
+            );
+            hide_window(app.clone());
+            if restore_focus {
+                focus_window(p.source);
+            }
+            toast(app, &format!("kept \u{2192} {filed}"));
+            return;
+        }
+        keepcmd::Outcome::Refused(why) => ("keep-refused", why),
+        keepcmd::Outcome::Failed(why) => ("keep-failed", why),
+    };
+    eprintln!("hvelf: keep: {chars} chars not filed into {vault}: {why}");
+    let why = why.trim_end_matches('.');
+    let next = if code == "keep-refused" {
+        "Pick another vault (a bounded one never syncs), or press Esc to drop it"
+    } else {
+        "Try again, or press Esc to drop it"
+    };
+    let message = format!("Not kept in {vault}: {why}. {next}; nothing has been filed.");
+    p.refused = true;
+    *keep.0.lock().unwrap() = Some(p);
+    let _ = app.emit("hvelf-notice", Failure::new(code, message, "keep-capture"));
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+        let _ = w.emit("keep", ());
+    }
 }
 
 /// Vaults as tiles: the preselected one first, then the rest in the
@@ -1508,6 +1633,10 @@ fn start_keep(app: &AppHandle, cfg: &Config, hist: &FocusHistory, keep: &KeepSta
         toast(app, &format!("keep: {why}; {}", keep_source(cfg)));
         return;
     }
+    if let Some(why) = filer_blocker(cfg) {
+        toast(app, &format!("keep: {why}"));
+        return;
+    }
     let now = chrono::Local::now();
     match linux::grab_selection(std::process::id(), std::time::Duration::from_millis(1500)) {
         Ok(linux::Grab::Own) => hide_window(app.clone()),
@@ -1544,6 +1673,18 @@ fn keep_source(cfg: &Config) -> String {
     } else {
         format!("vault map from `{}`", cfg.vault_map.join(" "))
     }
+}
+
+/// Why captures cannot be filed through the keep command: it is not there.
+/// Asked before anything is captured, as keep_blocker is. The search is the
+/// shell's on Linux; elsewhere a configured command is left to the system.
+#[cfg(target_os = "linux")]
+fn filer_blocker(cfg: &Config) -> Option<String> {
+    let prog = cfg.keep_command.first()?;
+    let path = std::env::var("PATH").ok();
+    keepcmd::find_program(prog, path.as_deref())
+        .is_none()
+        .then(|| format!("{prog} is not on PATH (keepCommand in config.json), so nothing was captured"))
 }
 
 /// Why a capture cannot be filed: no usable root, or no fallback vault to
@@ -1604,6 +1745,8 @@ fn queue_keep(
         vaults: ordered,
         exo,
         source: c.source,
+        via: cfg.keep_command.clone(),
+        refused: false,
     };
     *keep.0.lock().unwrap() = Some(pending);
     if let Some(w) = app.get_webview_window("main") {
@@ -1655,6 +1798,35 @@ fn map_capability(cfg: &Config, map: &Option<Result<vaultmap::VaultMap, String>>
                 m.fallback.as_deref().unwrap_or("none"),
                 if m.problems.is_empty() { String::new() } else { format!("; problems: {}", m.problems.join("; ")) }
             ),
+            source,
+        ),
+    }
+}
+
+/// How captures are filed, for `hvelf --capabilities` and the limits under
+/// the board: by Lab-OS's keep, whose checks then apply, or by hvelf itself.
+#[cfg(target_os = "linux")]
+fn filing_capability(cfg: &Config) -> Capability {
+    let Some(prog) = cfg.keep_command.first() else {
+        return linux::cap(
+            "keep-filing",
+            "degraded",
+            "keepCommand is empty: hvelf writes keeps itself, so the checks Lab-OS's keep makes before writing (the private-name guard for synced vaults among them) do not apply",
+            "config.json",
+        );
+    };
+    let source = cfg.keep_command.join(" ");
+    match keepcmd::find_program(prog, std::env::var("PATH").ok().as_deref()) {
+        Some(p) => linux::cap(
+            "keep-filing",
+            "available",
+            format!("captures are filed by {} on stdin, so its checks apply; what it refuses stays on the board and is not written", p.display()),
+            source,
+        ),
+        None => linux::cap(
+            "keep-filing",
+            "unavailable",
+            format!("{prog} is not on PATH: the keep chord captures nothing rather than file without Lab-OS's checks"),
             source,
         ),
     }
@@ -2202,6 +2374,7 @@ fn main() {
                 caps.extend(linux::capabilities());
                 caps.push(map_capability(&cfg, &map));
                 caps.push(keep_capability(&cfg, map));
+                caps.push(filing_capability(&cfg));
             }
             println!("{}", serde_json::to_string_pretty(&caps).unwrap());
             return;
@@ -2348,6 +2521,38 @@ mod tests {
         assert_eq!((c.hotkey.as_str(), c.quick_launch.as_str(), c.keep.as_str()), ("ctrl+alt+grave", "ctrl+alt+1", "alt+k"));
         assert_eq!(c.vault_map, ["exo", "vaults", "--json"]);
         assert_eq!(c.exocortex, "/opt/labos/current/kernel/instance/exocortex.toml");
+        assert_eq!(c.keep_command, ["keep"], "captures go through Lab-OS's keep");
+    }
+
+    /// A config written before keepCommand existed files through `keep` on
+    /// Linux; an empty one is honoured as written.
+    #[test]
+    fn keep_command_defaults_and_an_empty_one_is_kept() {
+        let c: Config = serde_json::from_str(r#"{"hotkey":"alt+grave","hide":[]}"#).unwrap();
+        assert_eq!(c.keep_command, default_keep_command());
+        #[cfg(target_os = "linux")]
+        assert_eq!(c.keep_command, ["keep"]);
+        #[cfg(not(target_os = "linux"))]
+        assert!(c.keep_command.is_empty());
+        let c: Config = serde_json::from_str(r#"{"keepCommand":[]}"#).unwrap();
+        assert!(c.keep_command.is_empty());
+        let c: Config = serde_json::from_str(r#"{"keepCommand":["python3","/k/bin/keep"]}"#).unwrap();
+        assert_eq!(c.keep_command, ["python3", "/k/bin/keep"]);
+    }
+
+    /// Through a keep command, a chosen vault is filed there and Esc parks the
+    /// capture in the fallback; once the command has refused it, Esc drops it,
+    /// and a vault may still be chosen. Without one, hvelf writes as before.
+    #[test]
+    fn filing_goes_through_keep_and_never_around_a_refusal() {
+        let via = vec!["keep".to_string()];
+        let keep = |v: &str, parked| Filing::Keep { vault: v.into(), parked };
+        assert_eq!(filing_for(&via, Some("Research/AI/AL"), false, "Lab-OS"), keep("Research/AI/AL", false));
+        assert_eq!(filing_for(&via, None, false, "Lab-OS"), keep("Lab-OS", true));
+        assert_eq!(filing_for(&via, None, true, "Lab-OS"), Filing::Drop);
+        assert_eq!(filing_for(&via, Some("Admin"), true, "Lab-OS"), keep("Admin", false));
+        assert_eq!(filing_for(&[], Some("AL"), false, "exo"), Filing::Write);
+        assert_eq!(filing_for(&[], None, true, "exo"), Filing::Write);
     }
 
     fn vault(id: &str, path: &str, open: bool) -> Vault {
