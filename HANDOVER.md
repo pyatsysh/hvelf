@@ -86,8 +86,11 @@ commit it, and let the gate publish it.
   1.98.1): `cargo test --locked` passed 73 tests, 59 in the crate and 14 in
   the two Linux integration suites, with no warnings. The X11 test against an
   Xvfb server in RELEASING.md was not run. macOS: only CI. `build.yml` builds
-  Linux, Windows and both macOS targets on every push to main, so the 2
-  November push is the three platform check; look at that Actions run.
+  Linux, Windows and both macOS targets on every push to main. The run on
+  the 2 November push (41480559678): Linux and both macOS builds passed;
+  Windows failed three `vaultmap` fixtures that used the Unix root `/v`,
+  which is not absolute there, so the draft release was skipped. The
+  fixtures now take a Windows root; the next push of main is the check.
 - **Not taken.** A hidden vault that is open still gets no tile (see Removing
   a tile). No version tag or draft release has been cut: the gate does not
   push tags, and a release is the owner's call per RELEASING.md.

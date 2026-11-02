@@ -216,6 +216,10 @@ pub fn load(argv: &[String], timeout: Duration) -> Result<VaultMap, String> {
 mod tests {
     use super::*;
 
+    /// The fixture root: absolute on every platform, since `parse` refuses a
+    /// root that is not, and `/v` is not absolute on Windows.
+    const ROOT: &str = if cfg!(windows) { r"C:\v" } else { "/v" };
+
     pub fn sample(root: &str) -> String {
         serde_json::json!({
             "schema": SCHEMA,
@@ -238,10 +242,10 @@ mod tests {
 
     #[test]
     fn a_map_parses_with_partitions_and_names() {
-        let m = parse(&sample("/v")).unwrap();
+        let m = parse(&sample(ROOT)).unwrap();
         assert_eq!(m.vaults.len(), 5);
         assert_eq!(by(&m, "ML").id, "Research/AI/ML");
-        assert_eq!(by(&m, "ML").path, PathBuf::from("/v/Research/AI/ML"));
+        assert_eq!(by(&m, "ML").path, PathBuf::from(format!("{ROOT}/Research/AI/ML")));
         assert!(by(&m, "Admin").bounded() && by(&m, "admin").bounded());
         assert!(!by(&m, "ML").bounded());
         assert_eq!(by(&m, "ML").name(), "ML");
@@ -250,18 +254,18 @@ mod tests {
 
     #[test]
     fn the_fallback_must_be_a_general_vault_of_the_map() {
-        let m = parse(&sample("/v")).unwrap();
+        let m = parse(&sample(ROOT)).unwrap();
         assert_eq!(m.fallback.as_deref(), Some("Lab-OS"));
         assert!(m.problems.is_empty());
         assert!(by(&m, "Admin/matter-a").bounded(), "bounded from its partition alone");
-        let m = parse(&sample("/v").replace("\"fallback\":\"Lab-OS\"", "\"fallback\":\"Admin\"")).unwrap();
+        let m = parse(&sample(ROOT).replace("\"fallback\":\"Lab-OS\"", "\"fallback\":\"Admin\"")).unwrap();
         assert_eq!(m.fallback, None);
         assert!(m.problems[0].contains("bounded"), "{:?}", m.problems);
-        let m = parse(&sample("/v").replace("\"fallback\":\"Lab-OS\"", "\"fallback\":null,\"problems\":[\"exo does not resolve\"]")).unwrap();
+        let m = parse(&sample(ROOT).replace("\"fallback\":\"Lab-OS\"", "\"fallback\":null,\"problems\":[\"exo does not resolve\"]")).unwrap();
         assert_eq!((m.fallback, m.problems), (None, vec!["exo does not resolve".to_string()]));
         // The live map of 2026-10-04 reports aliases MIGRATION has not placed
         // yet beside a good fallback: the fallback stands.
-        let m = parse(&sample("/v").replace("\"fallback\":\"Lab-OS\"", "\"fallback\":\"Lab-OS\",\"problems\":[\"alias exo points to Operational/exo, which does not exist\"]")).unwrap();
+        let m = parse(&sample(ROOT).replace("\"fallback\":\"Lab-OS\"", "\"fallback\":\"Lab-OS\",\"problems\":[\"alias exo points to Operational/exo, which does not exist\"]")).unwrap();
         assert_eq!(m.fallback.as_deref(), Some("Lab-OS"));
         assert_eq!(m.problems.len(), 1);
     }
@@ -269,14 +273,14 @@ mod tests {
     #[test]
     fn malformed_maps_are_refused() {
         assert!(parse("{}").is_err());
-        let wrong = sample("/v").replace(SCHEMA, "labos-vault-map/v0");
+        let wrong = sample(ROOT).replace(SCHEMA, "labos-vault-map/v0");
         assert!(parse(&wrong).unwrap_err().contains("schema"));
         assert!(parse(&sample("relative")).unwrap_err().contains("not absolute"));
         for bad in ["../x", "/abs", "a//b", "a/./b", "a\\b", ""] {
-            let m = sample("/v").replace("\"Admin/matter-a\"", &serde_json::to_string(bad).unwrap());
+            let m = sample(ROOT).replace("\"Admin/matter-a\"", &serde_json::to_string(bad).unwrap());
             assert!(parse(&m).is_err(), "{bad:?}");
         }
-        let twice = sample("/v").replace("\"Admin/matter-a\"", "\"Admin\"");
+        let twice = sample(ROOT).replace("\"Admin/matter-a\"", "\"Admin\"");
         assert!(parse(&twice).unwrap_err().contains("twice"));
     }
 
@@ -299,7 +303,7 @@ mod tests {
     #[test]
     fn the_command_is_bounded_and_its_failures_named() {
         let sh = |script: &str| vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()];
-        let m = load(&sh(&format!("printf '%s' '{}'", sample("/v"))), Duration::from_secs(5)).unwrap();
+        let m = load(&sh(&format!("printf '%s' '{}'", sample(ROOT))), Duration::from_secs(5)).unwrap();
         assert_eq!(m.vaults.len(), 5);
         let e = load(&sh("echo broken >&2; exit 3"), Duration::from_secs(5)).unwrap_err();
         assert!(e.contains("broken"), "{e}");
