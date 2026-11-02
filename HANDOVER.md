@@ -5,13 +5,18 @@ this is it.
 
 ## Branches
 
-- `main` is the trunk and carries the site in `docs/`.
-- `keep` adds the capture chord (`capture.rs`, `keep.rs`, `toast.html`) and
-  carries a Windows port of each board change made on main since (tiles by
-  vault id, the cross that removes, Hidden vaults). It exists only here and in
-  the Dropbox mirror, never on origin. **The merge is still owed**, and main
-  has since gained the Linux port, so it is now a real merge.
+- `main` is the trunk and carries the site in `docs/`. As of 2 November 2026
+  it holds everything: `keep` was merged on 4 October (ce62a15), and the
+  `native/*` branches that followed it (the Linux keep chord off the X11
+  PRIMARY selection, the Lab-OS vault map as the source of tiles, `--hidden`
+  and `--unhide`, captures filed through Lab-OS's `keep`, GNOME chord
+  handling, the board taking the keyboard on a summon) were fast-forwarded
+  onto it from the Lab-OS completion worktree and published to origin.
+- `keep` (ee6ef3d) is folded into main; the local branch stays as history.
 - `mac/hvelf-macos` is the macOS port branch, already folded into main.
+- Lab-OS carries an anonymised copy of this tree under `components/hvelf`,
+  taken by its snapshot tool; its 19 October README edit (the wording of
+  `keep`'s refusal) is on main too.
 
 ## The Windows build tree
 
@@ -21,6 +26,8 @@ from a hand copy of branch `keep` at `%USERPROFILE%\projects\hvelf`, whose
 drifts silently: after changing anything here, copy the changed files across
 and rebuild, or it keeps running the old code. As of 2026-09-28 the copy
 matches `keep` exactly, and the running binary was built from it that day.
+Main has moved past `keep` since, so refresh the copy from main before the
+next Windows build.
 
 The running binary holds `target\release\hvelf.exe` open, and `deps\hvelf.exe`
 is a hard link to the same file, so the linker cannot write either. Rename both
@@ -71,29 +78,16 @@ commit it, and let the gate publish it.
   Windows toolchain, no warnings, 6 of 6 tests. `keep` built as the release
   binary in the Windows tree, no warnings, 15 of 15 tests, and runs from the
   Startup shortcut. The menu itself has not yet been clicked by anyone.
-- **Next: a command line way back, for Linux desktops that show no tray.**
-  GNOME without the AppIndicator extension builds the tray and never shows it,
-  and hvelf cannot tell, so there Hidden vaults is unreachable. The plan, not
-  started: `hvelf --hidden` prints `hidden_menu` as JSON, like
-  `--list-vaults`; `hvelf --unhide <name or path>` becomes
-  `Action::Unhide(String)` (so `Action` loses `Copy`), `parse_cli` takes the
-  next argument and refuses one starting `--`. `main` checks the argument
-  against config.json before the single-instance handoff and exits 1 with a
-  message when nothing matches; the running board then puts back what
-  matches. A path matches by `norm_path`, a bare name every hidden entry whose
-  vault has that name; the tray keeps removing its one exact entry. Factor
-  `name_of` out of `hidden_menu` for this. Tests: `parse_cli` cases, a unit
-  test of the matching, and a `linux_cli.rs` case for `--hidden` and a
-  missing name. Document it in the README's Linux paragraph and `USAGE`.
-  Main only: `keep` is Windows, where the tray always shows.
-- **Not compiled here: Linux and macOS.** Nothing in the change is platform
-  gated, but neither build has run. Linux: this box has no host toolchain; a
-  rootless sysroot from the 2026-09-27 Linux port sits under `/var/tmp` (its
-  `bin/buildenv`), disposable, and its `cargo-heavy` wrapper pins cores that
-  belong to other sessions, so use `buildenv` with your own target directory
-  and `taskset`. macOS: only CI. `build.yml` builds Linux, Windows and both
-  macOS targets on every push to main, so the gate's next push of main is the
-  three platform check; look at that Actions run.
+- **Done, 4 October (76aa447):** `hvelf --hidden` prints the hidden entries
+  as JSON and `hvelf --unhide <name or path>` puts them back, the way back on
+  a Linux desktop that shows no tray; documented in the README's Linux
+  paragraph.
+- **Linux built here on 2 November 2026** with the host toolchain (cargo
+  1.98.1): `cargo test --locked` passed 73 tests, 59 in the crate and 14 in
+  the two Linux integration suites, with no warnings. The X11 test against an
+  Xvfb server in RELEASING.md was not run. macOS: only CI. `build.yml` builds
+  Linux, Windows and both macOS targets on every push to main, so the 2
+  November push is the three platform check; look at that Actions run.
 - **Not taken.** A hidden vault that is open still gets no tile (see Removing
   a tile). No version tag or draft release has been cut: the gate does not
   push tags, and a release is the owner's call per RELEASING.md.

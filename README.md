@@ -198,11 +198,14 @@ in its own format (`source: selection`, `app: terminal`, where it came from in
 files nothing outside a vault. What `keep` refuses, such as a passage naming
 private territory on its way into a vault in a synced folder pair, stays on
 the board with `keep`'s reason, which gives counts and line numbers, never the
-names: pick another vault (a bounded one never syncs), or press `Esc`, which
+names: pick another permitted vault, or press `Esc`, which
 now drops it. Nothing is written around a refusal, not even to
 `keeps/unrouted/`, and the text stays where it was selected. A `keepCommand`
 that is not on PATH makes the chord capture nothing, and
 `hvelf --capabilities` reports the route as `keep-filing`.
+
+Bounded retrieval does not by itself determine cloud placement. The configured
+map and `keep` guard decide the permitted destination.
 
 Without a map, vaults are the subfolders of a root named in a small registry
 file:
