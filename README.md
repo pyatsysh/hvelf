@@ -232,8 +232,10 @@ and renamed, so neither a sync client nor the indexer sees a half note. The last
 
 ## Status
 
-Windows is the reference platform. The Linux changes have not yet been rebuilt
-and exercised on Windows or macOS; the build workflow checks both platforms.
+Windows was the reference platform until the author's desktop moved to Linux in
+September 2026. The build workflow builds and tests all four targets on every push.
+macOS was exercised from source on an Intel Mac on 2 November 2026; the October
+changes have not yet run on a Windows desktop.
 
 **macOS**: vaults are discovered from Obsidian's registry, tiles launch
 through the `obsidian://` URI, the tray runs, and the summon and quick-launch
@@ -288,8 +290,10 @@ used. Autostart is not installed; add a desktop entry to
 ## Builds and releases
 
 See [RELEASING.md](RELEASING.md) for Linux prerequisites, locked builds,
-installer artifacts and draft releases. Linux desktop behaviour remains under
-qualification; the observed GUI checks so far used a virtual X display in WSL.
+installer artifacts and draft releases. The first tagged release is
+[v0.1.0](https://github.com/pyatsysh/hvelf/releases/tag/v0.1.0), a prerelease
+with installers for all four targets. Linux has been in daily use on a KDE X11
+desktop since October 2026; Wayland window control remains unsupported.
 
 ## Licence
 

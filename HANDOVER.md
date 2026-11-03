@@ -89,8 +89,8 @@ commit it, and let the gate publish it.
   Linux, Windows and both macOS targets on every push to main. The run on
   the 2 November push (41480559678): Linux and both macOS builds passed;
   Windows failed three `vaultmap` fixtures that used the Unix root `/v`,
-  which is not absolute there, so the draft release was skipped. The
-  fixtures now take a Windows root; the next push of main is the check.
+  which is not absolute there, so the draft release was skipped. With the
+  fixtures on a Windows root, run 41541229968 on a366040 passed all four.
 - **macOS built and used on 2 November 2026** on an Intel MacBook Pro,
   macOS 26.6.2, Homebrew rustc 1.98.0: `cargo build --release --locked` with
   no warnings, and `cargo test --release --locked` passed 38 tests in the
@@ -100,7 +100,9 @@ commit it, and let the gate publish it.
   tile asks, then removes it, and Hidden vaults in the tray menu puts it back.
   `--list-vaults` and `--hidden` answer from the command line.
 - **Not taken.** A hidden vault that is open still gets no tile (see Removing
-  a tile). No version tag or draft release has been cut: the gate does not
-  push tags, and a release is the owner's call per RELEASING.md.
+  a tile). v0.1.0 was tagged on a366040 and published as a
+  prerelease on 2 November 2026 on the owner's word, with the four installers,
+  SHA256SUMS and receipts; the tag went up with the gate override, since the
+  gate does not push tags.
 - The vault that went missing on 2026-09-27 is still in `hide` in the Windows
   config; the tray menu puts it back.

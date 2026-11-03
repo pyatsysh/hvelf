@@ -73,6 +73,7 @@
 
 <nav class="bar">
   <a href="https://github.com/pyatsysh/hvelf">Source</a>
+  <a href="https://github.com/pyatsysh/hvelf/releases">Download</a>
   <a href="https://github.com/pyatsysh/hvelf#build">Build</a>
   <a href="https://github.com/pyatsysh/hvelf#configuration">Configuration</a>
 </nav>
@@ -127,11 +128,19 @@
       a mouse path, the hidden vaults and a quit; there is no taskbar clutter.</li>
     <li><strong>Quick launch.</strong> An optional second hotkey opens your most
       recent vault directly, skipping the board entirely.</li>
+    <li><strong>Keep.</strong> Highlight text in any app and press
+      <kbd>Alt</kbd>+<kbd>K</kbd>: it is filed verbatim as a markdown note in a
+      vault's <code>keeps/</code> folder, with where it came from. Windows reads the
+      selection through UI Automation and Linux reads the X11 primary selection;
+      neither sends a key or touches the clipboard. The board opens in keep mode to
+      take the vault, and a capture is never discarded. Not on macOS, and not on
+      Wayland, which gives no application another one's selection.</li>
     <li><strong>Focus or launch.</strong> A tile raises the vault's window if it is
       already open, and opens the vault through Obsidian's <code>obsidian://</code>
       URI if it is not.</li>
     <li><strong>Live state.</strong> Tiles show which vaults are open right now: from
-      the live window list on Windows, and from Obsidian's own registry on macOS.</li>
+      the live window list on Windows and on Linux under X11, and from Obsidian's own
+      registry on macOS.</li>
     <li><strong>Close from the board.</strong> Hovering an open tile reveals an
       <code>×</code> that closes that vault's window. It is an ordinary close, so
       Obsidian saves state, and the renderer gives back the RAM it was holding.</li>
@@ -140,7 +149,8 @@
       first click asks and the second removes. The vault's path goes into
       <code>hide</code> in the config and Obsidian is left alone. <strong>Hidden
       vaults</strong>, in the tray menu, lists every vault taken off the board; click
-      one and its tile comes back.</li>
+      one and its tile comes back. Where no tray shows, <code>hvelf --hidden</code>
+      lists them and <code>hvelf --unhide</code> puts one back.</li>
     <li><strong>Recency order.</strong> Tiles sort most-recently-used first. While
       hvelf runs it tracks which vault window you actually have focused, which beats
       Obsidian's own timestamps: those only update when a vault is opened, not while
@@ -155,28 +165,47 @@
       its folder, so a copy of it elsewhere is a second vault with the same name.
       hvelf labels the two by their parent folder and acts on Obsidian's vault id,
       so the tile you press is the vault you get.</li>
-    <li><strong>Light.</strong> One small binary on Tauri 2 and WebView2, with no
-      Electron and no background CPU.</li>
+    <li><strong>Light.</strong> One small binary on Tauri 2 (WebView2 on Windows,
+      WebKitGTK on Linux), with no Electron and no background CPU.</li>
   </ul>
   </div>
 
   <p>Vaults come from Obsidian's own registry (<code>obsidian.json</code>), so there
-  is nothing to set up and the board always matches what Obsidian knows.</p>
+  is nothing to set up and the board always matches what Obsidian knows. Given a
+  vault map, as Lab-OS's <code>exo vaults --json</code> prints one, a link and the
+  folder it points at are one tile, bounded vaults are marked, and keeps are filed
+  by Lab-OS's own <code>keep</code> command, so its checks apply.</p>
+
+  <h2>Download</h2>
+  <p>Installers come from the <a href="https://github.com/pyatsysh/hvelf/releases">releases
+  page</a>, built by the workflow from a tagged commit: a <code>.deb</code> for Linux
+  x86_64 (Ubuntu 24.04 or newer, WebKitGTK 4.1), an NSIS <code>.exe</code> for Windows
+  x86_64, and a <code>.dmg</code> each for Intel and Apple Silicon Macs.
+  <code>SHA256SUMS</code> covers every file, and each package carries a receipt naming
+  its source commit. The first is
+  <a href="https://github.com/pyatsysh/hvelf/releases/tag/v0.1.0">v0.1.0</a>, a
+  prerelease: the Windows installer is unsigned and the disk images are not
+  notarised, so each system asks before it runs.</p>
 
   <h2>Build</h2>
-  <p>Requires Rust, with the MSVC toolchain on Windows and the Xcode command line
-  tools on macOS. A binary-only build needs no Node or npm; installer packaging uses the pinned npm tooling.</p>
+  <p>Requires Rust, with the MSVC toolchain on Windows, the Xcode command line tools
+  on macOS, and the WebKitGTK and AppIndicator development packages on Linux, listed
+  in <a href="https://github.com/pyatsysh/hvelf/blob/main/RELEASING.md">RELEASING.md</a>.
+  A binary-only build needs no Node or npm; installer packaging uses the pinned npm tooling.</p>
 <pre><code>cd src-tauri
 cargo build --release</code></pre>
   <p>The binary lands in <code>src-tauri/target/release/</code>, as
-  <code>hvelf.exe</code> on Windows and <code>hvelf</code> on macOS. Run it once and
+  <code>hvelf.exe</code> on Windows and <code>hvelf</code> on macOS and Linux. Run it once and
   it sits silent until the hotkey.</p>
 
   <h2>Configuration</h2>
-  <p><code>%APPDATA%\hvelf\config.json</code>, created with defaults on first run:</p>
+  <p><code>%APPDATA%\hvelf\config.json</code> on Windows and
+  <code>~/.config/hvelf/config.json</code> on macOS and Linux, created with defaults on
+  first run:</p>
 <pre><code>{
   "hotkey": "alt+grave",
   "quickLaunch": "alt+1",
+  "keep": "alt+k",
   "hideOnBlur": true,
   "hide": ["OldVault"],
   "groups": [
@@ -189,28 +218,36 @@ cargo build --release</code></pre>
   <code>win</code> with a letter, a digit, an f-key, or <code>grave</code>. The name
   <code>grave</code> binds the physical key under Esc on any keyboard layout: hvelf
   registers keys natively by scancode rather than through a US-mapped name table, so
-  it works the same on UK, DE or FR layouts. Field notes for the rest are in the
+  it works the same on UK, DE or FR layouts. On Linux the defaults are
+  <code>ctrl+alt+grave</code> and <code>ctrl+alt+1</code>, since GNOME already has Alt
+  and the key above Tab; a chord the desktop binds to the same hvelf command is left
+  to the desktop. Field notes for the rest are in the
   <a href="https://github.com/pyatsysh/hvelf#configuration">README</a>.</p>
 
   <h2>Status</h2>
-  <p>Windows and macOS both work. Windows has had the most use; macOS arrived in
-  August 2026 and is tested on one machine.</p>
-  <p>On macOS the hotkey summons and dismisses the board, the tiles list every
-  registered vault, clicking a tile launches it, and the open-vault indicator is
-  correct. The hotkey registers through Carbon rather than an event tap, so it asks
-  for no accessibility permission, and it binds both the ANSI and the ISO code for
-  the key under <kbd>Esc</kbd>, because macOS splits that key in two. Open state is
-  read from Obsidian's own registry, which carries a flag per vault, so that needs no
-  permission either. The flag can outlive a crash, and then the indicator is briefly
-  wrong.</p>
-  <p>Two things are not ported. Raising an already-open vault has no macOS
-  implementation: the click falls through to the <code>obsidian://</code> URI and
-  Obsidian raises its own window, which looks right without being the same code path.
-  Focus-based recency still falls back to Obsidian's last-opened timestamps there,
-  because tracking the focused window is permission-gated.</p>
-  <p>The macOS testing is one machine: an Intel MacBook Pro on macOS 26.6.2 with a UK
-  ISO keyboard, running a debug build from source. There is no bundling or
-  notarisation yet, so macOS packages remain drafts until reviewed. See <a href="https://github.com/pyatsysh/hvelf/blob/main/RELEASING.md">builds and releases</a>. Linux builds and its automated tests run under WSL, including X11 protocol tests on a virtual display. Native Linux desktop acceptance is pending. On Wayland, bind <code>hvelf --toggle</code> in the desktop settings; portal binding and compositor window control are not implemented. The current changes still need Windows and macOS regression checks. Autostart and themes remain on the roadmap.</p>
+  <p>Three desktops, three depths of use.</p>
+  <p><strong>Windows</strong> has had the most: the board, the tray and the keep chord
+  ran daily on the author's machine until his desktop moved to Linux in September 2026.
+  The October changes build and pass their tests there in CI; they have not yet run on
+  a Windows desktop.</p>
+  <p><strong>Linux</strong> has run daily on that KDE desktop, under X11, since October
+  2026. Window observation and control go through EWMH, so under Wayland the board
+  launches vaults but cannot raise or close their windows, and the keep chord is
+  unsupported. GNOME shows the tray only with the AppIndicator extension;
+  <code>hvelf --hidden</code> and <code>--unhide</code> are the way back without one.
+  <code>hvelf --capabilities</code> prints what the session you are in allows.</p>
+  <p><strong>macOS</strong> was built from source and clicked through on 2 November
+  2026, on an Intel MacBook Pro on macOS 26.6.2 with a UK ISO keyboard. The hotkeys
+  register through Carbon, so they ask for no accessibility permission, and bind both
+  the ANSI and the ISO code for the key under <kbd>Esc</kbd>, because macOS splits that
+  key in two. Open state comes from Obsidian's own per-vault flag, which can outlive a
+  crash and then mislabel a tile until Obsidian next writes it. Raising an already-open
+  vault falls through to the <code>obsidian://</code> URI, recency falls back to
+  Obsidian's timestamps, and the keep chord is not bound. Apple Silicon has only been
+  built in CI.</p>
+  <p>v0.1.0 is a prerelease for that reason: the builds and their tests pass on all
+  four targets, which is not the same as a desktop having been lived in. See
+  <a href="https://github.com/pyatsysh/hvelf/blob/main/RELEASING.md">builds and releases</a>.</p>
 
   <footer>
     © Peter Yatsyshin · MIT licence ·
