@@ -43,8 +43,8 @@ vault's path is appended to `hide` in `config.json`, edited as plain JSON so
 the user's key order and unknown keys survive, and to the running config,
 which the hotkey handlers share, so the vault leaves quick launch at once.
 The change is on both `main` and `keep`. The macOS side of it
-(`hotkey_macos.rs` taking the shared config) has never been compiled: this box
-has no macOS toolchain.
+(`hotkey_macos.rs` taking the shared config) was built and used on a Mac on
+2 November 2026; see Open.
 
 The way back is **Hidden vaults** in the tray menu (`tray_menu`, `unhide`):
 one item per `hide` entry, labelled as its tile was, with the parent folder
@@ -85,12 +85,20 @@ commit it, and let the gate publish it.
 - **Linux built here on 2 November 2026** with the host toolchain (cargo
   1.98.1): `cargo test --locked` passed 73 tests, 59 in the crate and 14 in
   the two Linux integration suites, with no warnings. The X11 test against an
-  Xvfb server in RELEASING.md was not run. macOS: only CI. `build.yml` builds
+  Xvfb server in RELEASING.md was not run. `build.yml` builds
   Linux, Windows and both macOS targets on every push to main. The run on
   the 2 November push (41480559678): Linux and both macOS builds passed;
   Windows failed three `vaultmap` fixtures that used the Unix root `/v`,
   which is not absolute there, so the draft release was skipped. The
   fixtures now take a Windows root; the next push of main is the check.
+- **macOS built and used on 2 November 2026** on an Intel MacBook Pro,
+  macOS 26.6.2, Homebrew rustc 1.98.0: `cargo build --release --locked` with
+  no warnings, and `cargo test --release --locked` passed 38 tests in the
+  crate, before and after the Windows root fix. The release binary runs from
+  the `app.hvelf` launch agent; both hotkeys bind and the log reports the keep
+  chord unbound, as designed. The owner clicked through it: the `×` on a shut
+  tile asks, then removes it, and Hidden vaults in the tray menu puts it back.
+  `--list-vaults` and `--hidden` answer from the command line.
 - **Not taken.** A hidden vault that is open still gets no tile (see Removing
   a tile). No version tag or draft release has been cut: the gate does not
   push tags, and a release is the owner's call per RELEASING.md.
