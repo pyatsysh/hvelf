@@ -253,7 +253,7 @@ prints the matrix for the one you are in.
 | vaults from `obsidian.json` (XDG, `~/.config`, Flatpak, Snap) | yes | yes | yes |
 | open through `obsidian://` (`xdg-open`, else `gio open`) | yes | yes | handler permitting |
 | open dots | observed from `_NET_CLIENT_LIST` | reported from Obsidian's flags | reported |
-| raise an open vault | `_NET_ACTIVE_WINDOW` | asked of Obsidian through the URI; the compositor may only flag it | no |
+| raise the vault's window | `_NET_ACTIVE_WINDOW`, for an open vault at once and for one just opened through the URI as soon as Obsidian shows it (KWin refuses Obsidian's own request) | asked of Obsidian through the URI; the compositor may only flag it | no |
 | close from the board | polite `_NET_CLOSE_WINDOW` | unsupported: the cross only removes the tile | no |
 | focus recency | active window every 2 s | Obsidian's stamps only | Obsidian's stamps only |
 | global hotkey | grabbed by keycode on the root window | bind `hvelf --toggle` as a desktop shortcut | none |

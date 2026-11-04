@@ -106,3 +106,17 @@ commit it, and let the gate publish it.
   gate does not push tags.
 - The vault that went missing on 2026-09-27 is still in `hide` in the Windows
   config; the tray menu puts it back.
+- **4 November 2026, KDE under X11:** a vault picked on the board stayed
+  behind the window the owner was in whenever hvelf went through
+  `obsidian://`, which it does for a vault with no window and did for one
+  whose window was titled with the vault alone, before a note is open (a
+  two-part title was not read). KWin at its default focus-stealing level
+  refuses Obsidian's own request, timed from Obsidian's last keystroke, and
+  leaves the window where it is; the pager-style `_NET_ACTIVE_WINDOW` hvelf
+  sends for a window it already knows is honoured, minimised ones included.
+  Both were checked on the desktop with a ClientMessage from a script and
+  `xdg-open` of the link, reading `_NET_ACTIVE_WINDOW` back. hvelf now reads
+  the two-part title and, after the link, polls the window list for up to
+  ten seconds and raises the window Obsidian made, or the only one of that
+  name. The hub was still running the 12 October 0.1.0 package; the fix needs
+  a rebuilt one.

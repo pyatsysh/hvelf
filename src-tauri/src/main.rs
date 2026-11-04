@@ -660,15 +660,30 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Extract the vault name from an Obsidian window title of the form
-/// "<note> - <vault> - Obsidian <version>".
+/// The vault named in an Obsidian window title. Obsidian titles a window
+/// "<note> - <vault> - Obsidian <version>", and "<vault> - Obsidian <version>"
+/// until a note is open in it, so the vault is the part before the last. The
+/// last part has to be Obsidian's own, "Obsidian" alone or with its version
+/// after a space: a browser window titled "... - Obsidian Forum" names no
+/// vault, and neither does a pop-out that Obsidian has titled "Obsidian".
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 fn vault_from_title(title: &str) -> Option<String> {
     let parts: Vec<&str> = title.split(" - ").collect();
-    if parts.len() >= 3 && parts.last().map_or(false, |l| l.starts_with("Obsidian")) {
-        Some(parts[parts.len() - 2].to_string())
-    } else {
-        None
+    let [.., vault, last] = parts.as_slice() else { return None };
+    obsidian_suffix(last).then(|| vault.to_string())
+}
+
+/// "Obsidian", "Obsidian 1.14.5", "Obsidian v1.6.7": the end of every title
+/// Obsidian writes, and of nothing else.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn obsidian_suffix(last: &str) -> bool {
+    match last.strip_prefix("Obsidian") {
+        Some("") => true,
+        Some(rest) => rest
+            .strip_prefix(' ')
+            .map(|r| r.strip_prefix('v').unwrap_or(r))
+            .map_or(false, |r| r.starts_with(|c: char| c.is_ascii_digit())),
+        None => false,
     }
 }
 
@@ -731,13 +746,17 @@ fn obsidian_windows() -> Vec<(isize, String)> {
     if linux::session() != linux::Session::X11 {
         return Vec::new();
     }
-    match linux::x11::Ewmh::connect(None).and_then(|w| w.titled_windows()) {
-        Ok(wins) => wins
-            .into_iter()
-            .filter_map(|(w, t)| vault_from_title(&t).map(|v| (w as isize, v)))
-            .collect(),
-        Err(_) => Vec::new(),
-    }
+    linux::x11::Ewmh::connect(None).map(|w| obsidian_windows_on(&w)).unwrap_or_default()
+}
+
+/// The same list over a connection the caller keeps, for a poll.
+#[cfg(target_os = "linux")]
+fn obsidian_windows_on(ewmh: &linux::x11::Ewmh) -> Vec<(isize, String)> {
+    ewmh.titled_windows()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(w, t)| vault_from_title(&t).map(|v| (w as isize, v)))
+        .collect()
 }
 
 #[cfg(all(not(windows), not(target_os = "linux")))]
@@ -1156,7 +1175,10 @@ fn do_launch(app: &AppHandle, cfg: &Config, id: &str) -> Result<(), Failure> {
     }
     #[cfg(target_os = "linux")]
     {
-        linux::open_uri(&uri, std::env::var("PATH").ok().as_deref())
+        let before: Vec<isize> = obsidian_windows().into_iter().map(|(h, _)| h).collect();
+        linux::open_uri(&uri, std::env::var("PATH").ok().as_deref())?;
+        raise_when_it_appears(v.name.clone(), before);
+        Ok(())
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -1182,6 +1204,57 @@ fn focus_window(hwnd: isize) {
 fn focus_window(hwnd: isize) {
     if let Err(e) = linux::x11::Ewmh::connect(None).and_then(|w| w.request_activate(hwnd as u32)) {
         eprintln!("hvelf: cannot raise window: {e}");
+    }
+}
+
+/// How long a vault asked for through `obsidian://` is given to show a
+/// window: a cold start of Obsidian takes most of it.
+#[cfg(target_os = "linux")]
+const RAISE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Raise the vault's window once Obsidian has it, on X11. Asked through the
+/// link, Obsidian shows or makes the window and asks for the focus itself,
+/// and a window manager with focus-stealing prevention (KWin at its default
+/// level, on the owner's desktop on 4 November 2026) finds that request
+/// older than the user's last keystroke in the window they were in and
+/// leaves the vault behind it. hvelf took the user's key, so it raises the
+/// window as a pager would, which `focus_window` already does for a window
+/// that was there before the link went out. The window list is polled off
+/// the main thread, since a cold start takes seconds. A window made since
+/// the link went out wins over a namesake that was already there; with
+/// nothing new and two namesakes, nothing is raised rather than the wrong one.
+#[cfg(target_os = "linux")]
+fn raise_when_it_appears(name: String, before: Vec<isize>) {
+    if linux::session() != linux::Session::X11 {
+        return;
+    }
+    std::thread::spawn(move || {
+        let Ok(ewmh) = linux::x11::Ewmh::connect(None) else { return };
+        let deadline = std::time::Instant::now() + RAISE_WAIT;
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            if let Some(h) = window_to_raise(&obsidian_windows_on(&ewmh), &name, &before) {
+                if let Err(e) = ewmh.request_activate(h as u32) {
+                    eprintln!("hvelf: cannot raise window: {e}");
+                }
+                return;
+            }
+        }
+    });
+}
+
+/// Which of `wins` (handle, vault name) to raise for `name`: a window not
+/// among the handles seen `before` the link went out, else the only window
+/// of that name.
+#[cfg(target_os = "linux")]
+fn window_to_raise(wins: &[(isize, String)], name: &str, before: &[isize]) -> Option<isize> {
+    let named: Vec<isize> = wins.iter().filter(|(_, v)| same_name(v, name)).map(|(h, _)| *h).collect();
+    match named.iter().find(|h| !before.contains(h)) {
+        Some(new) => Some(*new),
+        None => match named.as_slice() {
+            [only] => Some(*only),
+            _ => None,
+        },
     }
 }
 
@@ -2659,6 +2732,35 @@ mod tests {
         assert_eq!(parse_cli(&args(&["--capabilities"])), Ok(Cli::Capabilities));
         assert!(parse_cli(&args(&["--toggle", "--quit"])).is_err());
         assert!(parse_cli(&args(&["obsidian://open?vault=x; rm -rf ~"])).is_err());
+    }
+
+    /// Obsidian titles a window with the note, the vault and its own name,
+    /// and with the vault alone until a note is open; nothing else names a
+    /// vault.
+    #[test]
+    fn the_vault_is_read_off_an_obsidian_title() {
+        assert_eq!(vault_from_title("Deck Preview - cDFT - Obsidian 1.14.5").as_deref(), Some("cDFT"));
+        assert_eq!(vault_from_title("Ideas \"draft\" - Vault \u{3a9} \u{e9} - Obsidian v1.6.7").as_deref(), Some("Vault \u{3a9} \u{e9}"));
+        assert_eq!(vault_from_title("02-REPLY-DRAFT - moreland-dispute - Obsidian 1.14.5").as_deref(), Some("moreland-dispute"));
+        assert_eq!(vault_from_title("cDFT - Obsidian 1.14.5").as_deref(), Some("cDFT"), "no note open yet");
+        assert_eq!(vault_from_title("Obsidian"), None, "a pop-out before it has a note");
+        assert_eq!(vault_from_title("Sync stopped - Obsidian Forum - Google Chrome"), None);
+        assert_eq!(vault_from_title("Download - Obsidian Forum"), None);
+        assert_eq!(vault_from_title("Downloads \u{2014} Dolphin"), None);
+    }
+
+    /// After a link goes out, the window Obsidian made for it is the one to
+    /// raise; a namesake that was already open is taken only when it is the
+    /// only one of that name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_window_made_for_the_link_is_the_one_raised() {
+        let wins = vec![(1, "cDFT".to_string()), (2, "Nature_2026".to_string()), (3, "cdft".to_string())];
+        assert_eq!(window_to_raise(&wins, "cDFT", &[1, 2]), Some(3), "the new window, matched as Obsidian matches names");
+        assert_eq!(window_to_raise(&wins, "Nature_2026", &[1, 2, 3]), Some(2), "nothing new: the only window of that name");
+        assert_eq!(window_to_raise(&wins, "cDFT", &[1, 2, 3]), None, "nothing new and two namesakes: neither");
+        assert_eq!(window_to_raise(&wins, "Lab-OS", &[]), None, "not open yet");
+        assert_eq!(window_to_raise(&[], "Lab-OS", &[]), None);
     }
 
     /// The Linux defaults take chords GNOME leaves free (the GNOME and GNOME
