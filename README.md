@@ -258,6 +258,13 @@ prints the matrix for the one you are in.
 | focus recency | active window every 2 s | Obsidian's stamps only | Obsidian's stamps only |
 | global hotkey | grabbed by keycode on the root window | bind `hvelf --toggle` as a desktop shortcut | none |
 
+A link to an Obsidian that is already running goes through Obsidian's own
+command socket, `$XDG_RUNTIME_DIR/.obsidian-cli.sock` since 1.11.7. An
+Obsidian that quits removes that socket, even one a newer Obsidian is
+listening on, after which every link is dropped silently. hvelf checks for the
+socket before sending a link and tells you to restart Obsidian instead, and
+if a link goes out and no window appears within ten seconds it says that too.
+
 hvelf currently uses EWMH for window observation and control, which applies to
 X11. It has no Wayland compositor integration for those operations. Global
 shortcuts are a separate feature: the desktop portal provides an API on

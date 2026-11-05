@@ -131,3 +131,15 @@ commit it, and let the gate publish it.
   November test that was read as KWin refusing the focus was one of these.
   Links come back when Obsidian is restarted on the new build. The board now
   says so when its ten-second wait ends with no window of that name.
+- **5 November 2026, later: the socket, not the build.** After the restart
+  the first link went through and the next ones did not. Obsidian's launcher
+  (read from obsidian-1.15.0.asar) sends a second process's command line,
+  links included, to `$XDG_RUNTIME_DIR/.obsidian-cli.sock` and exits with
+  "Unable to connect to main process" when it cannot connect, with no other
+  route; the running Obsidian removes that path with `unlinkSync` on
+  `will-quit`, unconditionally. An Obsidian that quit at 10:23:21, five
+  seconds after the new one had started listening, took the new one's socket
+  path with it: `ss` still showed the listener, `ls` showed no file, and the
+  earlier failures since 2 November had the same shape. Remedy: quit
+  Obsidian, wait until no obsidian process is left, then start it. The board
+  now checks for the socket before sending a link and says this at once.

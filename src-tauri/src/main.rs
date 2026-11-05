@@ -673,6 +673,30 @@ fn vault_from_title(title: &str) -> Option<String> {
     obsidian_suffix(last).then(|| vault.to_string())
 }
 
+/// Obsidian's version as its window title states it: "Obsidian 1.15.0",
+/// "Obsidian v1.6.7". None for a title that is not Obsidian's.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn title_version(title: &str) -> Option<(u32, u32, u32)> {
+    let last = title.rsplit(" - ").next()?;
+    let rest = last.strip_prefix("Obsidian")?.trim_start().trim_start_matches('v');
+    let mut it = rest.split('.').map(|p| p.trim_end_matches(|c: char| !c.is_ascii_digit()).parse::<u32>());
+    Some((it.next()?.ok()?, it.next()?.ok()?, it.next().unwrap_or(Ok(0)).ok()?))
+}
+
+/// The Obsidian versions on the display, one per window, as the titles say.
+#[cfg(target_os = "linux")]
+fn obsidian_versions_seen() -> Vec<(u32, u32, u32)> {
+    if linux::session() != linux::Session::X11 {
+        return Vec::new();
+    }
+    linux::x11::Ewmh::connect(None)
+        .and_then(|w| w.titled_windows())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(_, t)| title_version(&t))
+        .collect()
+}
+
 /// "Obsidian", "Obsidian 1.14.5", "Obsidian v1.6.7": the end of every title
 /// Obsidian writes, and of nothing else.
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -1175,6 +1199,15 @@ fn do_launch(app: &AppHandle, cfg: &Config, id: &str) -> Result<(), Failure> {
     }
     #[cfg(target_os = "linux")]
     {
+        // A link to a running Obsidian goes through its command socket; when
+        // that is gone the link is dropped before it arrives, and this is
+        // the only place that can say so (linux.rs, `link_dead_end`).
+        let (_, kind, _) = linux::registry();
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+        let socket = linux::command_socket(&home, std::env::var("XDG_RUNTIME_DIR").ok().as_deref());
+        if let Some(why) = linux::link_dead_end(&obsidian_versions_seen(), kind, &socket) {
+            return Err(Failure::new("unreachable", why, "open-vault"));
+        }
         let before: Vec<isize> = obsidian_windows().into_iter().map(|(h, _)| h).collect();
         linux::open_uri(&uri, std::env::var("PATH").ok().as_deref())?;
         raise_when_it_appears(app.clone(), v.name.clone(), before);
@@ -2770,6 +2803,18 @@ mod tests {
         assert_eq!(vault_from_title("Sync stopped - Obsidian Forum - Google Chrome"), None);
         assert_eq!(vault_from_title("Download - Obsidian Forum"), None);
         assert_eq!(vault_from_title("Downloads \u{2014} Dolphin"), None);
+    }
+
+    /// The version in a title is read as Obsidian writes it, old and new.
+    #[test]
+    fn the_version_is_read_off_an_obsidian_title() {
+        assert_eq!(title_version("Deck Preview - cDFT - Obsidian 1.15.0"), Some((1, 15, 0)));
+        assert_eq!(title_version("cDFT - Obsidian 1.14.5"), Some((1, 14, 5)));
+        assert_eq!(title_version("Ideas - Vault - Obsidian v1.6.7"), Some((1, 6, 7)));
+        assert_eq!(title_version("Obsidian"), None);
+        assert_eq!(title_version("Sync stopped - Obsidian Forum - Google Chrome"), None);
+        assert_eq!(title_version("Download - Obsidian Forum"), None);
+        assert!(title_version("x - Obsidian 1.11.7") >= Some((1, 11, 7)));
     }
 
     /// After a link goes out, the window Obsidian made for it is the one to

@@ -322,6 +322,42 @@ pub fn portal_global_shortcuts() -> Result<u32, String> {
         .unwrap_or_else(|_| Err("portal did not answer within 3 s".into()))
 }
 
+// ------------------------------------------------ links to a running Obsidian
+
+/// Where Obsidian 1.11.7 and later listens for its command line, links
+/// included: a second Obsidian process, started for a link, connects here,
+/// hands the link over and exits, and has no other route. Read on
+/// 5 November 2026 from Obsidian's own launcher in obsidian-1.15.0.asar:
+/// `$XDG_RUNTIME_DIR/.obsidian-cli.sock`, else `$HOME/.obsidian-cli.sock`.
+pub fn command_socket(home: &Path, xdg_runtime_dir: Option<&str>) -> PathBuf {
+    match xdg_runtime_dir.filter(|d| !d.is_empty()) {
+        Some(d) => Path::new(d).join(".obsidian-cli.sock"),
+        None => home.join(".obsidian-cli.sock"),
+    }
+}
+
+/// Why a link would reach nothing, when it would: Obsidian is running (a
+/// window on the display names a version of 1.11.7 or later), from the
+/// standard install, and its command socket is not there. Any Obsidian that
+/// quits removes that path unconditionally (`will-quit` in the same
+/// launcher), so one that quits after the running one started leaves it
+/// unreachable for every link until it is restarted itself, and the second
+/// process says only "Unable to connect to main process" on a log nobody
+/// reads. Flatpak and Snap keep their own runtime directories, where the
+/// socket cannot be seen from outside, so only the standard install is judged.
+pub fn link_dead_end(versions_seen: &[(u32, u32, u32)], registry_kind: &str, socket: &Path) -> Option<String> {
+    if registry_kind != "standard" || socket.exists() {
+        return None;
+    }
+    if !versions_seen.iter().any(|&v| v >= (1, 11, 7)) {
+        return None;
+    }
+    Some(format!(
+        "Obsidian is running but cannot be reached: its command socket {} is missing, so every link is dropped before it arrives (an Obsidian that quit after this one started removes it). Quit Obsidian, wait until no obsidian process is left, then start it again.",
+        socket.display()
+    ))
+}
+
 // ------------------------------------------------------------------ X11
 
 pub mod x11 {
@@ -1047,6 +1083,33 @@ mod tests {
         assert_eq!(config_home_from(home, Some("/x/cfg")), PathBuf::from("/x/cfg"));
         assert_eq!(config_home_from(home, Some("relative/cfg")), home.join(".config"));
         assert_eq!(config_home_from(home, None), home.join(".config"));
+    }
+
+    /// The socket is where Obsidian's launcher puts it, and a link is refused
+    /// only when a current Obsidian from the standard install is on the
+    /// display without it.
+    #[test]
+    fn a_missing_command_socket_is_a_dead_end_for_links() {
+        let home = Path::new("/home/x");
+        assert_eq!(command_socket(home, Some("/run/user/7")), PathBuf::from("/run/user/7/.obsidian-cli.sock"));
+        assert_eq!(command_socket(home, Some("")), PathBuf::from("/home/x/.obsidian-cli.sock"));
+        assert_eq!(command_socket(home, None), PathBuf::from("/home/x/.obsidian-cli.sock"));
+
+        let missing = std::env::temp_dir().join(format!("hvelf-no-such-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&missing);
+        let why = link_dead_end(&[(1, 15, 0)], "standard", &missing).expect("a current Obsidian without its socket");
+        assert!(why.contains("cannot be reached") && why.contains(&missing.display().to_string()));
+        assert!(why.contains("wait until no obsidian process is left"), "the remedy is named");
+        assert_eq!(link_dead_end(&[(1, 11, 7)], "standard", &missing).is_some(), true, "the first version with the socket");
+        assert_eq!(link_dead_end(&[(1, 10, 9)], "standard", &missing), None, "older Obsidians hand links over another way");
+        assert_eq!(link_dead_end(&[], "standard", &missing), None, "no Obsidian window: a link starts one");
+        assert_eq!(link_dead_end(&[(1, 15, 0)], "flatpak", &missing), None);
+        assert_eq!(link_dead_end(&[(1, 15, 0)], "snap", &missing), None);
+
+        let present = std::env::temp_dir().join(format!("hvelf-sock-{}.sock", std::process::id()));
+        std::fs::write(&present, b"").unwrap();
+        assert_eq!(link_dead_end(&[(1, 15, 0)], "standard", &present), None);
+        let _ = std::fs::remove_file(&present);
     }
 
     #[test]
