@@ -1177,7 +1177,7 @@ fn do_launch(app: &AppHandle, cfg: &Config, id: &str) -> Result<(), Failure> {
     {
         let before: Vec<isize> = obsidian_windows().into_iter().map(|(h, _)| h).collect();
         linux::open_uri(&uri, std::env::var("PATH").ok().as_deref())?;
-        raise_when_it_appears(v.name.clone(), before);
+        raise_when_it_appears(app.clone(), v.name.clone(), before);
         Ok(())
     }
     #[cfg(not(target_os = "linux"))]
@@ -1223,8 +1223,15 @@ const RAISE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// the main thread, since a cold start takes seconds. A window made since
 /// the link went out wins over a namesake that was already there; with
 /// nothing new and two namesakes, nothing is raised rather than the wrong one.
+///
+/// A link can also go nowhere: Obsidian takes it in a second process, which
+/// hands it to the running one, and on 5 November 2026 that hand-off was
+/// found to drop every link once an update had been downloaded behind a
+/// running Obsidian (the second process loads the new build, the first
+/// still runs the old). Nothing says so anywhere, so when the wait ends with
+/// no window of that name at all, the board comes back and says it.
 #[cfg(target_os = "linux")]
-fn raise_when_it_appears(name: String, before: Vec<isize>) {
+fn raise_when_it_appears(app: AppHandle, name: String, before: Vec<isize>) {
     if linux::session() != linux::Session::X11 {
         return;
     }
@@ -1239,6 +1246,22 @@ fn raise_when_it_appears(name: String, before: Vec<isize>) {
                 }
                 return;
             }
+        }
+        if obsidian_windows_on(&ewmh).iter().any(|(_, v)| same_name(v, &name)) {
+            return; // namesakes it would not choose between; Obsidian did act
+        }
+        let f = Failure::new(
+            "no-window",
+            format!(
+                "Obsidian showed no window for {name} within {} s. If Obsidian has an update waiting to install, restart it: until then it drops the links hvelf sends.",
+                RAISE_WAIT.as_secs()
+            ),
+            "open-vault",
+        );
+        eprintln!("hvelf: {}: {}", f.code, f.message);
+        let _ = app.emit("hvelf-notice", f);
+        if let Some(w) = app.get_webview_window("main") {
+            show_board(&w);
         }
     });
 }

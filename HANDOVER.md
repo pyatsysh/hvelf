@@ -120,3 +120,14 @@ commit it, and let the gate publish it.
   ten seconds and raises the window Obsidian made, or the only one of that
   name. The hub was still running the 12 October 0.1.0 package; the fix needs
   a rebuilt one.
+- **5 November 2026, the links themselves.** With that build installed, a
+  vault with no window still did not open: driving the board by keyboard for
+  Lab-OS produced no window at all, and `xdg-open` of a deep link into the
+  open AL vault changed nothing either. `obsidian.log` shows why. Obsidian
+  takes each link in a second process that hands it to the running one, and
+  since the 1.15.0 update was downloaded on 2 November at 16:06, behind an
+  Obsidian started at 13:06 that day on 1.14.5, every link launch logs
+  `Loaded updated app obsidian-1.15.0.asar` and nothing follows: the 4
+  November test that was read as KWin refusing the focus was one of these.
+  Links come back when Obsidian is restarted on the new build. The board now
+  says so when its ten-second wait ends with no window of that name.
