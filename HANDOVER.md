@@ -143,3 +143,34 @@ commit it, and let the gate publish it.
   earlier failures since 2 November had the same shape. Remedy: quit
   Obsidian, wait until no obsidian process is left, then start it. The board
   now checks for the socket before sending a link and says this at once.
+- **5 November 2026, the raise itself.** With links flowing again, an open
+  vault picked on the board still stayed behind: the board logged "raising
+  its window" and the focus went straight back to the vault the owner came
+  from. The board's hide (GTK's connection) and the raise (hvelf's own) reach
+  KWin in no fixed order; when the raise lands first, KWin sees its active
+  window unmap and hands the focus to the previously active window, after
+  the vault's. A pager-style request from a script, with no board to hide,
+  raised the same window every time. The raise now waits until the keyboard
+  window manager no longer lists the board and the active window is not
+  hvelf's (the keyboard focus alone leaves earlier, when the X server reverts
+  it on the unmap, and a raise sent then was still undone), plus 60 ms, before
+  it is sent, on a thread of its own: `launch` runs on the main thread, the
+  one that processes the hide, and a first attempt that waited there held the
+  board up for the half second and then lost the same race the other way.
+  This was in the 12 October build too.
+- **5 November 2026, the request that never arrived.** Even sent after
+  the hide, the board's raise did nothing, while the same request from a
+  script landed at any delay, and the board's landed every time under
+  strace. The difference was the connection: `focus_window` opened one,
+  wrote and flushed the request and dropped it the next instant, and that
+  request never reached KWin. Holding the connection open to read
+  `_NET_ACTIVE_WINDOW` back makes it land on the first request, three of
+  three; `raise_until_in_front` does that for every raise, with a repeat
+  as a backstop. The keep flow's focus return went through the same
+  function and will have been lost the same way.
+  Checked with the packaged binary: an open vault behind another came up
+  three times of three, a vault with no window opened and came up within a
+  second, each on the first request. Seen once in a full `cargo test` run
+  and not since: `missing_handler_and_opener_are_reported_not_ignored`
+  failed, then passed alone and in every later run; worth a look if it
+  recurs.

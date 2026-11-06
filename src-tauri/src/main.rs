@@ -1186,7 +1186,8 @@ fn do_launch(app: &AppHandle, cfg: &Config, id: &str) -> Result<(), Failure> {
     // navigate inside the vault.
     if cfg.deep_link(v).is_none() {
         if let Some(h) = window_for(&all, v) {
-            focus_window(h);
+            eprintln!("hvelf: {}: raising its window {h:#x}", v.name);
+            raise_once_the_board_has_gone(h);
             return Ok(());
         }
     }
@@ -1210,6 +1211,7 @@ fn do_launch(app: &AppHandle, cfg: &Config, id: &str) -> Result<(), Failure> {
         }
         let before: Vec<isize> = obsidian_windows().into_iter().map(|(h, _)| h).collect();
         linux::open_uri(&uri, std::env::var("PATH").ok().as_deref())?;
+        eprintln!("hvelf: {}: link sent, {} Obsidian window(s) seen before it", v.name, before.len());
         raise_when_it_appears(app.clone(), v.name.clone(), before);
         Ok(())
     }
@@ -1233,11 +1235,94 @@ fn focus_window(hwnd: isize) {
     }
 }
 
+/// The board's hide and the raise it asks for reach the window manager over
+/// two connections, GTK's and hvelf's own, in no fixed order. When the raise
+/// is granted first, KWin then sees its active window, the board, unmap, and
+/// passes the focus on to the window that was active before the board: the
+/// vault the user came from, over the one they asked for. From a script, with
+/// no board to hide, the same request raised the vault every time; from the
+/// board it never did (5 November 2026). So the raise waits until the window
+/// manager has dealt with the hide: until it no longer lists a window of
+/// hvelf's and the active window is not hvelf's, which it publishes only
+/// after passing the focus on. The keyboard focus alone leaves the board
+/// earlier, when the X server reverts it on the unmap, before the window
+/// manager has seen anything, and a raise sent then was still undone. Never
+/// on the main thread: that is the thread that has to process the hide, and
+/// waiting there only held the board up and then lost the same race the
+/// other way. A raise sent 100 ms after the hide landed every time from a
+/// script; the margin here is on top of the condition.
+#[cfg(target_os = "linux")]
+fn once_the_board_has_gone() {
+    if linux::session() != linux::Session::X11 {
+        return;
+    }
+    let pid = std::process::id();
+    let Ok(ewmh) = linux::x11::Ewmh::connect(None) else { return };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(700);
+    while std::time::Instant::now() < deadline {
+        let listed = ewmh.client_list().unwrap_or_default().into_iter().any(|w| ewmh.pid_of(w) == Some(pid));
+        let active_is_ours = ewmh.active_window().map_or(false, |w| ewmh.pid_of(w) == Some(pid));
+        if !listed && !active_is_ours {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(15));
+    }
+    std::thread::sleep(std::time::Duration::from_millis(60));
+}
+
+/// Raise a window the board already knows, once the board is out of the way.
+#[cfg(target_os = "linux")]
+fn raise_once_the_board_has_gone(h: isize) {
+    std::thread::spawn(move || {
+        let t0 = std::time::Instant::now();
+        once_the_board_has_gone();
+        let tries = raise_until_in_front(h);
+        eprintln!("hvelf: raised {h:#x} once the board had gone ({} ms, {tries} request(s))", t0.elapsed().as_millis());
+    });
+}
+
+/// Ask for the window and read back, on the same connection, which window
+/// the window manager now reports active; ask again if it is not this one,
+/// at most six times over half a second. Returns the number of requests.
+///
+/// The read-back is the cure, not only the check. On 5 November 2026 the
+/// board's request, written and flushed on a connection that was dropped
+/// the next instant, never reached KWin: the same request from a script
+/// landed every time, and the board's landed every time once strace had
+/// slowed the drop. With the connection held open for the answer it lands
+/// on the first request. The repeat is a backstop for whatever else may
+/// swallow one.
+#[cfg(target_os = "linux")]
+fn raise_until_in_front(h: isize) -> u32 {
+    let Ok(ewmh) = linux::x11::Ewmh::connect(None) else { return 0 };
+    let mut tries = 0;
+    while tries < 6 {
+        if let Err(e) = ewmh.request_activate(h as u32) {
+            eprintln!("hvelf: cannot raise window: {e}");
+            return tries;
+        }
+        tries += 1;
+        for _ in 0..8 {
+            std::thread::sleep(std::time::Duration::from_millis(12));
+            if ewmh.active_window() == Some(h as u32) {
+                return tries;
+            }
+        }
+    }
+    tries
+}
+
+#[cfg(not(target_os = "linux"))]
+fn raise_once_the_board_has_gone(h: isize) {
+    focus_window(h);
+}
+
+/// Raise a window through the window manager and stay connected until it
+/// answers (`raise_until_in_front`): a request on a connection dropped the
+/// moment after it was flushed never reached the window manager here.
 #[cfg(target_os = "linux")]
 fn focus_window(hwnd: isize) {
-    if let Err(e) = linux::x11::Ewmh::connect(None).and_then(|w| w.request_activate(hwnd as u32)) {
-        eprintln!("hvelf: cannot raise window: {e}");
-    }
+    let _ = raise_until_in_front(hwnd);
 }
 
 /// How long a vault asked for through `obsidian://` is given to show a
@@ -1269,14 +1354,14 @@ fn raise_when_it_appears(app: AppHandle, name: String, before: Vec<isize>) {
         return;
     }
     std::thread::spawn(move || {
+        once_the_board_has_gone();
         let Ok(ewmh) = linux::x11::Ewmh::connect(None) else { return };
         let deadline = std::time::Instant::now() + RAISE_WAIT;
         while std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(150));
             if let Some(h) = window_to_raise(&obsidian_windows_on(&ewmh), &name, &before) {
-                if let Err(e) = ewmh.request_activate(h as u32) {
-                    eprintln!("hvelf: cannot raise window: {e}");
-                }
+                let tries = raise_until_in_front(h);
+                eprintln!("hvelf: {name}: raised {h:#x} after the link ({tries} request(s))");
                 return;
             }
         }
